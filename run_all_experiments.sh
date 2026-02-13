@@ -33,7 +33,14 @@ set -o pipefail
 
 EXPERIMENTS_DIR="experiments"
 MASTER_LOG="$EXPERIMENTS_DIR/master_log.txt"
-DEVICE="mps"
+# Auto-detect device: cuda > mps > cpu
+if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    DEVICE="cuda"
+elif python3 -c "import torch; assert torch.backends.mps.is_available()" 2>/dev/null; then
+    DEVICE="mps"
+else
+    DEVICE="cpu"
+fi
 
 mkdir -p "$EXPERIMENTS_DIR"
 
