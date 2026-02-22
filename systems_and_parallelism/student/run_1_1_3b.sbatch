@@ -13,7 +13,7 @@
 # Context length fixed at 128, batch size 4
 
 singularity exec --bind /scratch --nv \
-  --overlay /scratch/mm14444/overlay-25GB-500K.ext3:rw \
+  --overlay /scratch/mm14444/overlay-25GB-500K.ext3:ro \
   /scratch/mm14444/ubuntu-20.04.3.sif \
   /bin/bash -c '
     source /ext3/miniconda3/etc/profile.d/conda.sh
