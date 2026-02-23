@@ -70,6 +70,8 @@ def parse_args():
                         help="Number of steps to time")
     parser.add_argument("--nvtx_attention", action="store_true",
                     help="Enable NVTX-annotated attention for 1.1.4(e)")
+    parser.add_argument("--optimizer", action="store_true",
+                    help="Include AdamW optimizer step for 1.1.4(d)")
     parser.add_argument("--mode", type=str, default="both",
                         choices=["forward", "backward", "both"],
                         help="What to benchmark: forward only, backward only, or both")
@@ -161,7 +163,7 @@ function benchmark(model, input_ids, num_steps):
     return times
 '''
 
-def benchmark(model, input_ids, mode, warmup_steps, measure_steps):
+def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=None):
     """
     Run warmup, then timed measurement steps.
     Returns list of times in seconds.
@@ -175,6 +177,8 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps):
             if mode in ("backward", "both"):
                 loss = output.sum()
                 loss.backward()
+                if optimizer is not None:
+                    optimizer.step()
             torch.cuda.synchronize()
 
     # ─── Phase 2: Measurement ───
@@ -195,6 +199,10 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps):
                     with nvtx.range("backward"):         # <-- NEW
                         loss = output.sum()
                         loss.backward()
+
+                    if optimizer is not None:
+                        with nvtx.range("optimizer_step"):
+                            optimizer.step()
 
             torch.cuda.synchronize()
             end = timeit.default_timer()
@@ -227,9 +235,15 @@ def main():
     model = create_model(args.model_size, args.vocab_size, args.context_length)
     input_ids = generate_random_batch(args.batch_size, args.context_length, args.vocab_size)
 
+    # Create optimizer if requested (for 1.1.4d — full training step)
+    optimizer = None
+    if args.optimizer:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+        print("AdamW optimizer: ENABLED")
+
     # Run benchmark
     times = benchmark(model, input_ids, args.mode,
-                      args.warmup_steps, args.measure_steps)
+                      args.warmup_steps, args.measure_steps, optimizer=optimizer)
 
     # Report results
     mean_time = np.mean(times)
