@@ -19,12 +19,24 @@ singularity exec --bind /scratch --nv \
   /bin/bash -c '
     source /ext3/miniconda3/etc/profile.d/conda.sh
     export PATH=/ext3/miniconda3/bin:$PATH
+
+    # ─── Add nsys to PATH (installed via NSYS_doc.pdf instructions) ───
+    NSYS_DIR=$(dirname $(find ~/tools/nsight-systems -type f -name nsys -perm -111 2>/dev/null | head -n1) 2>/dev/null)
+    if [ -n "$NSYS_DIR" ]; then
+        export PATH=$NSYS_DIR:$PATH
+        echo "nsys found at: $(which nsys)"
+    else
+        echo "ERROR: nsys not found! Run the install steps from NSYS_doc.pdf first."
+        exit 1
+    fi
+
     cd /scratch/mm14444/transformer-lm-from-scratch/systems_and_parallelism
 
     echo "============================================"
     echo "  1.1.4 — Nsight Systems Profiling"
     echo "  Date: $(date)"
     echo "  GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader)"
+    echo "  nsys: $(nsys --version)"
     echo "============================================"
     echo ""
 
@@ -36,10 +48,12 @@ singularity exec --bind /scratch --nv \
         for CTX in 128 256 512 1024; do
             echo ""
             echo "--- Profiling: $SIZE, ctx=$CTX, mode=forward ---"
-            uv run nsys profile \
-                -o "profiles/fwd_${SIZE}_${CTX}" \
-                --force-overwrite true \
-                python student/benchmark.py \
+            nsys profile \
+                --trace nvtx \
+                --stats=true \
+                --output "profiles/fwd_${SIZE}_${CTX}" \
+                --force-overwrite=true \
+                uv run python student/benchmark.py \
                 --model_size "$SIZE" \
                 --context_length "$CTX" \
                 --mode forward \
@@ -57,10 +71,12 @@ singularity exec --bind /scratch --nv \
         for CTX in 128 256 512 1024; do
             echo ""
             echo "--- Profiling: $SIZE, ctx=$CTX, mode=both ---"
-            uv run nsys profile \
-                -o "profiles/both_${SIZE}_${CTX}" \
-                --force-overwrite true \
-                python student/benchmark.py \
+            nsys profile \
+                --trace nvtx \
+                --stats=true \
+                --output "profiles/both_${SIZE}_${CTX}" \
+                --force-overwrite=true \
+                uv run python student/benchmark.py \
                 --model_size "$SIZE" \
                 --context_length "$CTX" \
                 --mode both \
@@ -78,10 +94,12 @@ singularity exec --bind /scratch --nv \
         for CTX in 128 256 512 1024; do
             echo ""
             echo "--- Profiling attention: $SIZE, ctx=$CTX ---"
-            uv run nsys profile \
-                -o "profiles/attn_${SIZE}_${CTX}" \
-                --force-overwrite true \
-                python student/benchmark.py \
+            nsys profile \
+                --trace nvtx \
+                --stats=true \
+                --output "profiles/attn_${SIZE}_${CTX}" \
+                --force-overwrite=true \
+                uv run python student/benchmark.py \
                 --model_size "$SIZE" \
                 --context_length "$CTX" \
                 --mode forward \
@@ -92,19 +110,10 @@ singularity exec --bind /scratch --nv \
         done
     done
 
-    # ─── Generate text stats for key profiles ───
-    echo ""
-    echo ""
-    echo ">>> GENERATING TEXT STATS <<<"
-    for f in profiles/*.nsys-rep; do
-        base=$(basename "$f" .nsys-rep)
-        echo "--- Stats: $base ---"
-        nsys stats "$f" > "profiles/stats_${base}.txt" 2>&1 || echo "stats failed for $f"
-    done
-
     echo ""
     echo "============================================"
     echo "  Done! $(date)"
     echo "  Profile files in: profiles/"
+    echo "  Stats printed above (--stats=true)"
     echo "============================================"
 '
