@@ -1111,7 +1111,7 @@ backward()              → gradients stored in FP32
 uv run python student/toymodel_mixed_precision.py
 ```
 
-### Expected output
+### Actual output (A100-SXM4-40GB)
 
 ```
 Model parameters dtype: torch.float32           ← weights are always FP32
@@ -1125,7 +1125,7 @@ Gradient dtype (fc1.weight.grad): torch.float32 ← gradients are FP32
 
 ### Deliverable answer for 1.1.5(a)
 
-> PENDING — fill in actual output after running on HPC. The expected pattern is: model parameters remain FP32 even inside autocast. Linear layer (matmul) outputs are FP16. LayerNorm output is FP32 (accumulation-sensitive). Loss is FP32. Gradients are FP32.
+> Under FP16 autocast, model parameters remain stored in FP32 — autocast does not modify the weights in memory, it creates temporary FP16 copies for computation. Linear layer outputs (matmuls) are downcast to FP16 for speed on tensor cores. LayerNorm output is kept in FP32 because its mean/variance accumulation is precision-sensitive (as demonstrated in mixed_precision_accumulation). The loss (cross_entropy) is computed in FP32, and all gradients are stored in FP32. This confirms autocast is truly "mixed" — it selectively downcasts only the compute-heavy, precision-tolerant operations (matmuls) while preserving FP32 for accumulation-sensitive operations.
 
 ---
 
@@ -1196,29 +1196,39 @@ This sbatch runs all three parts:
 
 ### Results
 
-**RESULTS PENDING — run `sbatch student/run_1_1_5c.sbatch` on HPC**
+**GPU: NVIDIA A100-SXM4-40GB** | context_length=128 | batch_size=4 | mode=both | warmup=5 | measure=10
 
 | Model | FP32 Fwd+Bwd (ms) | BF16 Fwd+Bwd (ms) | Speedup |
 |-------|--------------------|--------------------|---------|
-| small | ? | ? | ? |
-| medium | ? | ? | ? |
-| large | ? | ? | ? |
-| xl | ? | ? | ? |
-| 2.7B | ? | ? | ? |
+| small | 77.17 | 87.79 | 0.88x (slower!) |
+| medium | 153.67 | 174.10 | 0.88x (slower!) |
+| large | 269.73 | 265.16 | 1.02x (breakeven) |
+| xl | 463.06 | 361.23 | 1.28x |
+| 2.7B | 674.57 | 242.04 | 2.79x |
 
-### What to expect
+### Analysis
 
-- **BF16 should be 1.3-2x faster than FP32**, especially for larger models
-- **Why?** The A100 tensor cores process BF16 matmuls at 312 TFLOPS vs 19.5 TFLOPS for FP32 — 16x more raw throughput. But the overall speedup is less than 16x because:
-  - Not everything is matmul (LayerNorm, softmax stay FP32)
-  - Memory bandwidth is also a bottleneck (not just compute)
-  - Kernel launch overhead is the same regardless of precision
-- **Larger models benefit more** — they spend a bigger fraction of time in matmuls (the part that gets faster), so the overall speedup is larger
-- **Smaller models benefit less** — overhead is a larger fraction of their total time
+The results show a clear pattern — **mixed precision only helps for larger models**:
+
+1. **Small and medium models are actually SLOWER with BF16** (0.88x). Why? These models are too small to be "compute-bound" — they spend most of their time on overhead (kernel launches, memory transfers, LayerNorm, etc.), not on matmuls. The overhead of autocast (creating temporary BF16 copies, dtype conversions) actually adds more cost than the matmul speedup saves.
+
+2. **Large model is roughly breakeven** (1.02x). This is the crossover point where the matmul speedup starts to offset the autocast overhead.
+
+3. **XL model sees a meaningful 1.28x speedup.** The model is now large enough that matmuls dominate the runtime, so the BF16 tensor core speedup starts to show.
+
+4. **2.7B model gets a massive 2.79x speedup.** This model spends the vast majority of its time in matmuls (we saw 70-85% in 1.1.4). BF16 tensor cores process these matmuls much faster, and the overhead is a tiny fraction of the total time.
+
+**Why not 16x speedup?** The A100 has 312 TFLOPS BF16 vs 19.5 TFLOPS FP32 (16x ratio), but:
+- Not everything is matmul — LayerNorm, softmax, loss stay FP32
+- Memory bandwidth is also a bottleneck, not just compute
+- Kernel launch overhead is the same regardless of precision
+- At context_length=128, the matrices are relatively small — tensor cores need large matrices to reach peak throughput
+
+**Key insight**: Mixed precision is not a free lunch. It only helps when the model is large enough to be compute-bound on matmuls. For small models with short sequences, the overhead of dtype conversion actually hurts performance.
 
 ### Deliverable answer for 1.1.5(c) [2-3 sentences]
 
-> PENDING — fill in after running on HPC with actual numbers.
+> On an A100-SXM4-40GB with context_length=128, BF16 mixed precision provides significant speedups only for larger models: 2.79x for 2.7B and 1.28x for XL, while small and medium models are actually 12% slower due to autocast overhead exceeding the matmul speedup. The crossover point is around the large model (1.02x breakeven). This confirms that mixed precision benefits scale with the fraction of runtime spent on matmuls — small models at short context lengths are overhead-dominated, not compute-bound, so faster tensor core matmuls don't translate to overall speedup.
 
 ---
 

@@ -1,0 +1,56 @@
+============================================
+  1.1.5 — Mixed Precision
+  Date: Thu Mar  5 18:41:22 EST 2026
+  GPU:  NVIDIA A100-SXM4-40GB
+============================================
+
+>>> mixed_precision_accumulation <<<
+===================================
+Snippet 1 — FP32 + FP32:       10.000133514404297
+Snippet 2 — FP16 + FP16:       9.953125
+Snippet 3 — FP32 + FP16:       10.00213623046875
+Snippet 4 — FP32 + FP16→FP32:  10.00213623046875
+
+>>> ToyModel dtype inspection <<<
+=================================
+Model parameters dtype: torch.float32
+
+Parameters inside autocast: torch.float32
+After fc1 + relu (output dtype): torch.float16
+After LayerNorm (output dtype):  torch.float32
+Logits dtype:                    torch.float16
+Loss dtype:                      torch.float32
+Gradient dtype (fc1.weight.grad): torch.float32
+
+>>> FP32 vs BF16 benchmark comparison <<<
+==========================================
+
+=== small — FP32 ===
+Mean: 77.17 ms | Std: 0.85 ms
+
+=== small — BF16 ===
+Mean: 87.79 ms | Std: 1.42 ms
+
+=== medium — FP32 ===
+Mean: 153.67 ms | Std: 0.61 ms
+
+=== medium — BF16 ===
+Mean: 174.10 ms | Std: 1.77 ms
+
+=== large — FP32 ===
+Mean: 269.73 ms | Std: 1.26 ms
+
+=== large — BF16 ===
+Mean: 265.16 ms | Std: 2.44 ms
+
+=== xl — FP32 ===
+Mean: 463.06 ms | Std: 1.85 ms
+
+=== xl — BF16 ===
+Mean: 361.23 ms | Std: 6.71 ms
+
+=== 2.7B — FP32 ===
+Mean: 674.57 ms | Std: 0.09 ms
+
+=== 2.7B — BF16 ===
+Mean: 242.04 ms | Std: 2.70 ms
