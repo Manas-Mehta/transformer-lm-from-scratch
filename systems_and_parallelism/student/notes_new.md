@@ -871,11 +871,27 @@ nsys profile --trace cuda,nvtx --stats=true \
 | xl | 256 | 176.3 | 592.2 | 768.6 | 3.36x |
 | xl | 512 | 357.6 | 1170.2 | 1527.8 | 3.27x |
 
-**RESULTS WITH OPTIMIZER — PENDING** (run `sbatch student/run_1_1_4d.sbatch`)
+**RESULTS WITH OPTIMIZER** (from `sbatch student/run_1_1_4d.sbatch`):
+
+| Model | ctx | Forward (ms) | Backward (ms) | Optimizer (ms) | Step total (ms) | Optim % of step |
+|-------|-----|-------------|--------------|----------------|-----------------|-----------------|
+| small | 128 | 45.8 | 57.8 | 3.0 | 106.6 | 2.8% |
+| small | 256 | 45.0 | 59.2 | 3.1 | 107.4 | 2.9% |
+| small | 512 | 47.2 | 58.8 | 3.0 | 109.1 | 2.8% |
+
+**CUDA kernel breakdown — matmul fraction in full training step (forward+backward+optimizer):**
+
+| Model | ctx | sgemm % (full step) | sgemm % (forward-only) | Difference |
+|-------|-----|--------------------|-----------------------|------------|
+| small | 128 | ~63.5% | ~70-75% | -7 to -12 pp |
+| small | 256 | ~70.1% | ~80-85% | -10 to -15 pp |
+| small | 512 | ~69.6% | ~82% | -12 pp |
+
+The optimizer adds `multi_tensor_apply_kernel` entries (~15% of GPU kernel time) — these are fused elementwise kernels for AdamW's momentum update, variance update, weight decay, and parameter step. The backward pass also adds elementwise gradient accumulation kernels that further reduce the matmul fraction.
 
 ### Deliverable answer for 1.1.4(d) [1-2 sentences]
 
-> PENDING — re-run with `--optimizer` flag. Expected: The optimizer step (AdamW) adds elementwise kernels for momentum, variance, weight decay, and parameter updates. This slightly reduces the matmul fraction of total time, but matmul still dominates overall. The backward pass adds ~2x the matmul FLOPs of forward (gradients for each weight matrix), plus the optimizer step adds per-parameter elementwise operations.
+> In a full training step (forward + backward + AdamW optimizer), the matmul fraction drops from ~70-85% (forward-only) to ~63-70% of GPU kernel time. The backward pass adds elementwise gradient kernels, and the AdamW optimizer adds fused multi-tensor kernels for momentum/variance/weight updates (~15% of GPU time), though the optimizer wall-clock time is very cheap (~3ms, <3% of step time) since these are simple elementwise operations.
 
 ---
 
