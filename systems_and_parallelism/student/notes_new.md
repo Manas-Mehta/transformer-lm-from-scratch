@@ -1048,27 +1048,27 @@ We add 0.01 one thousand times. The correct answer is 10.0.
 uv run python student/mixed_precision_test.py
 ```
 
-### Expected results
+### Actual results
 
 ```
-Snippet 1 — FP32 + FP32:       10.000002    ← nearly perfect
-Snippet 2 — FP16 + FP16:       9.9980       ← noticeably wrong (accumulator stalled)
-Snippet 3 — FP32 + FP16:       9.9951...    ← better than 2, but 0.01 was already imprecise in FP16
-Snippet 4 — FP32 + FP16→FP32:  9.9951...    ← same as 3 (casting doesn't recover lost precision)
+Snippet 1 — FP32 + FP32:       10.000133514404297
+Snippet 2 — FP16 + FP16:       9.953125
+Snippet 3 — FP32 + FP16:       10.00213623046875
+Snippet 4 — FP32 + FP16→FP32:  10.00213623046875
 ```
 
 ### Why each snippet gives that result
 
-- **Snippet 1** (FP32+FP32): Nearly perfect. FP32 has 23 mantissa bits — plenty of precision.
-- **Snippet 2** (FP16+FP16): The accumulator `s` is FP16. Once `s` grows past ~8.0, adding 0.01 gets rounded to 0 because FP16 can't represent the difference. The sum "stalls."
-- **Snippet 3** (FP32+FP16): The accumulator is FP32 (no stalling), but the value 0.01 is stored in FP16 as 0.00999755... — the damage happens at creation, not accumulation.
-- **Snippet 4** (FP32+cast): Explicitly casting FP16→FP32 doesn't help because 0.01 was already rounded when stored in FP16. You can't recover precision that's already lost.
+- **Snippet 1** (FP32+FP32): 10.0001 — very close. FP32 has 23 mantissa bits — plenty of precision. The tiny 0.0001 error is normal floating-point rounding that accumulates over 1000 additions.
+- **Snippet 2** (FP16+FP16): **9.953 — visibly wrong** (off by ~0.05). The accumulator `s` is FP16. Once `s` grows past ~8.0, adding 0.01 gets rounded away because FP16 can't represent the difference between 8.0 and 8.01. The sum "stalls" — this is the key danger of low-precision accumulation.
+- **Snippet 3** (FP32+FP16): 10.002 — very close. The FP32 accumulator prevents stalling. The small overshoot comes from 0.01 being stored in FP16 as ~0.01000213... (slightly over), which adds up over 1000 iterations.
+- **Snippet 4** (FP32+cast): Identical to Snippet 3 (10.002). Explicitly casting FP16→FP32 before adding doesn't change anything — the imprecision was already baked in when 0.01 was created as FP16.
 
-**Key takeaway**: This is why `torch.autocast` keeps accumulation-heavy operations (LayerNorm mean/variance, loss functions) in FP32 — to avoid this stalling problem.
+**Key takeaway**: The FP32 accumulator (Snippets 3/4) prevents the stalling problem, making them much closer to 10.0 than pure FP16 (Snippet 2). This is why `torch.autocast` keeps accumulation-heavy operations (LayerNorm mean/variance, loss functions) in FP32.
 
 ### Deliverable answer for mixed_precision_accumulation
 
-> PENDING — fill in actual output after running on HPC.
+> FP32+FP32 gives 10.0001 (nearly perfect), while FP16+FP16 gives 9.953 — off by ~0.05 due to the accumulator stalling when the running sum grows too large for FP16 to represent small increments. Using an FP32 accumulator with FP16 values (Snippets 3/4) gives 10.002, much closer to correct, because the FP32 accumulator prevents stalling — the remaining small error comes from 0.01 being slightly imprecise in FP16 representation (stored as ~0.010002). This demonstrates why mixed precision keeps accumulation operations (LayerNorm, loss) in FP32.
 
 ---
 
