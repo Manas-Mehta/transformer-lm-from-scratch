@@ -28,6 +28,7 @@ import argparse          # For command-line argument parsing
 import timeit            # For high-resolution timing
 import torch
 import numpy as np
+from contextlib import nullcontext   # No-op context manager (for mixed precision toggle)
 from a1_basics.model import BasicsTransformerLM
 import math
 import torch.cuda.nvtx as nvtx   # NVTX annotations for nsys profiling
@@ -72,6 +73,8 @@ def parse_args():
                     help="Enable NVTX-annotated attention for 1.1.4(e)")
     parser.add_argument("--optimizer", action="store_true",
                     help="Include AdamW optimizer step for 1.1.4(d)")
+    parser.add_argument("--mixed_precision", action="store_true",
+                    help="Use BF16 mixed precision (for Section 1.1.5)")
     parser.add_argument("--mode", type=str, default="both",
                         choices=["forward", "backward", "both"],
                         help="What to benchmark: forward only, backward only, or both")
@@ -163,17 +166,21 @@ function benchmark(model, input_ids, num_steps):
     return times
 '''
 
-def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=None):
+def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=None, amp_context=None):
     """
     Run warmup, then timed measurement steps.
     Returns list of times in seconds.
     """
+    if amp_context is None:
+        amp_context = nullcontext()
+
     # ─── Phase 1: Warm-up (not timed) ───
-    with nvtx.range("warmup"):                         # <-- NEW
+    with nvtx.range("warmup"):
         for _ in range(warmup_steps):
             if mode in ("backward", "both"):
                 model.zero_grad(set_to_none=True)
-            output = model(input_ids)
+            with amp_context:
+                output = model(input_ids)
             if mode in ("backward", "both"):
                 loss = output.sum()
                 loss.backward()
@@ -183,7 +190,7 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=Non
 
     # ─── Phase 2: Measurement ───
     times = []
-    with nvtx.range("measurement"):                    # <-- NEW
+    with nvtx.range("measurement"):
         for i in range(measure_steps):
             if mode in ("backward", "both"):
                 model.zero_grad(set_to_none=True)
@@ -191,12 +198,13 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=Non
             torch.cuda.synchronize()
             start = timeit.default_timer()
 
-            with nvtx.range(f"step_{i}"):               # <-- NEW
-                with nvtx.range("forward"):              # <-- NEW
-                    output = model(input_ids)
+            with nvtx.range(f"step_{i}"):
+                with nvtx.range("forward"):
+                    with amp_context:
+                        output = model(input_ids)
 
                 if mode in ("backward", "both"):
-                    with nvtx.range("backward"):         # <-- NEW
+                    with nvtx.range("backward"):
                         loss = output.sum()
                         loss.backward()
 
@@ -241,9 +249,17 @@ def main():
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
         print("AdamW optimizer: ENABLED")
 
+    # Mixed precision context (for 1.1.5c)
+    if args.mixed_precision:
+        amp_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        print("Mixed precision: BF16 ENABLED")
+    else:
+        amp_context = nullcontext()
+
     # Run benchmark
     times = benchmark(model, input_ids, args.mode,
-                      args.warmup_steps, args.measure_steps, optimizer=optimizer)
+                      args.warmup_steps, args.measure_steps,
+                      optimizer=optimizer, amp_context=amp_context)
 
     # Report results
     mean_time = np.mean(times)

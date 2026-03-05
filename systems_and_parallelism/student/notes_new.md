@@ -939,175 +939,107 @@ With d_k = 64 (small model: 768/12 heads), matmul has ~64x more FLOPs than softm
 
 ## 1.1.5 Mixed Precision
 
-### What this section is about
+### What this section is about (big picture)
 
-Mixed precision training uses lower-precision floating point numbers (like FP16 or BF16) for some computations instead of FP32 everywhere. This can make training 1.5-2x faster because lower precision means: (1) more values fit in GPU memory, (2) tensor cores can do more operations per cycle, and (3) less memory bandwidth is needed.
+In 1.1.4, we saw that transformers spend 70-85% of their GPU time on matrix multiplication.
+**Mixed precision** is a technique that makes those matmuls ~2x faster by using smaller numbers.
+
+Here's the simple idea:
+- Normal training uses **FP32** (32-bit floating point) for all math.
+- Mixed precision uses **BF16** (16-bit) for the heavy matmuls, but keeps **FP32** for the delicate stuff (normalization, loss).
+- Since BF16 numbers are half the size, the GPU can crunch through them roughly twice as fast.
+
+It's called "mixed" because you mix two precisions — fast BF16 where it's safe, accurate FP32 where it matters.
 
 ### Key concepts
 
-#### Floating point number types
+#### What is a floating point number?
 
-| Type | Bits | Exponent | Mantissa | Range | Precision |
-|------|------|----------|----------|-------|-----------|
-| FP32 | 32 | 8 | 23 | huge | high |
-| FP16 | 16 | 5 | 10 | limited | low |
-| BF16 | 16 | 8 | 7 | same as FP32 | lower than FP16 |
+A number like `3.14` is stored in the computer as bits split into three parts:
+- **Sign bit**: positive or negative (1 bit)
+- **Exponent bits**: how big/small the number is (like scientific notation: 3.14 × 10^2)
+- **Mantissa bits**: how precise the number is (how many decimal places)
 
-- **FP32 (float32)**: Standard precision. 32 bits, very accurate, but slower and uses more memory.
-- **FP16 (float16)**: Half precision. 16 bits, faster on tensor cores, but limited range (can overflow/underflow).
-- **BF16 (bfloat16)**: Brain floating point. 16 bits like FP16, but keeps the same exponent range as FP32. Less precise than FP16 in the mantissa, but much more robust against overflow. This is the preferred choice for training.
+| Type | Total Bits | Exponent | Mantissa | What it means |
+|------|-----------|----------|----------|---------------|
+| FP32 | 32 | 8 | 23 | Very precise, large range, but slow and uses lots of memory |
+| FP16 | 16 | 5 | 10 | Fast, but tiny range — numbers can "overflow" and become infinity |
+| BF16 | 16 | 8 | 7 | Fast, same range as FP32, but less precise (fewer decimal places) |
+
+**Why BF16 is preferred over FP16 for training:**
+- FP16 has only 5 exponent bits → numbers can overflow (become infinity) during training
+- BF16 has 8 exponent bits (same as FP32) → same range, so no overflow risk
+- BF16 has fewer mantissa bits (7 vs 10) → slightly less precise, but that's fine for matmuls
+- The A100 GPU has special hardware ("tensor cores") that process BF16 matmuls at 312 TFLOPS vs only 19.5 TFLOPS for FP32 — that's **16x more throughput**!
 
 #### What is `torch.autocast`?
 
-`torch.autocast(device_type="cuda", dtype=torch.bfloat16)` is PyTorch's automatic mixed precision context manager. Inside this context:
+`torch.autocast` is PyTorch's tool for automatic mixed precision. You wrap your forward pass in it:
 
-- **Matrix multiplications (GEMMs)** are automatically cast to BF16 for speed
-- **Reductions and normalization** (LayerNorm, softmax, loss computation) stay in FP32 for numerical stability
-- **Model weights remain in FP32** in memory -- only the computation is done in lower precision
-- **Outputs may be BF16 or FP32** depending on the operation
+```python
+with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    output = model(input_ids)  # matmuls inside here run in BF16
+```
 
-This is "mixed" precision because different operations use different precisions -- you get the speed of BF16 where it's safe, and the accuracy of FP32 where it matters.
+What happens inside:
+- **Matrix multiplications** (the expensive 70-85% of GPU time) → automatically run in BF16
+- **LayerNorm, softmax, loss** (delicate operations) → stay in FP32 for accuracy
+- **Model weights stay in FP32** in memory — autocast creates temporary BF16 copies just for the computation
+- **Gradients are computed in FP32** — backward pass is full precision
+
+You don't have to manually change any dtypes. PyTorch figures out which ops to downcast.
 
 #### What is `nullcontext()`?
 
-When we're NOT using mixed precision, we still want our benchmarking code to work without changing the structure. `nullcontext()` is a context manager that does absolutely nothing:
+A "do nothing" context manager. We use it so our code doesn't need if/else branches:
 
 ```python
 from contextlib import nullcontext
 
-# These two are equivalent:
-with nullcontext():
-    output = model(input_ids)
-
-output = model(input_ids)  # same thing
-```
-
-This lets us write:
-```python
+# Without mixed precision: amp_context does nothing
+# With mixed precision: amp_context activates BF16
 amp_context = torch.autocast(...) if args.mixed_precision else nullcontext()
+
 with amp_context:
-    output = model(input_ids)
+    output = model(input_ids)  # works either way!
 ```
 
-Without needing separate code paths for FP32 vs. mixed precision.
+### What we changed in benchmark.py
 
-### What we need to change in benchmark.py
+We made **4 small changes** to support mixed precision:
 
-We need to make **3 changes** to benchmark.py to support mixed precision:
+1. **Added import**: `from contextlib import nullcontext`
+2. **Added flag**: `--mixed_precision` in `parse_args()`
+3. **In `main()`**: Create `amp_context` (either `torch.autocast` or `nullcontext`) and pass it to `benchmark()`
+4. **In `benchmark()`**: Wrap `output = model(input_ids)` with `with amp_context:`
 
-1. **Add `nullcontext` import**
-2. **Add `--mixed_precision` flag to `parse_args()`**
-3. **Set up `amp_context` in `main()` and pass it to `benchmark()`**
-
-#### Step 1: Add the nullcontext import
-
-At the top of benchmark.py:
-
-```python
-from contextlib import nullcontext  # No-op context manager (for mixed precision toggle)
-```
-
-#### Step 2: Add `--mixed_precision` flag to `parse_args()`
-
-```python
-parser.add_argument("--mixed_precision", action="store_true",
-                    help="Use BF16 mixed precision (for Section 1.1.5)")
-```
-
-#### Step 3: Update `benchmark()` to accept an `amp_context` parameter
-
-Change the function signature:
-
-```python
-def benchmark(model, input_ids, mode, warmup_steps, measure_steps, amp_context):
-```
-
-Then wrap the forward pass with `amp_context`:
-
-```python
-# In warmup loop:
-with amp_context:
-    output = model(input_ids)
-
-# In measurement loop (inside the nvtx.range("forward") block):
-with nvtx.range("forward"):
-    with amp_context:
-        output = model(input_ids)
-```
-
-If `--mixed_precision` is off, `amp_context` is `nullcontext()` which does nothing.
-If `--mixed_precision` is on, `amp_context` is `torch.autocast(...)` which casts matmuls to BF16.
-
-#### Step 4: Set up `amp_context` in `main()` and pass it
-
-In `main()`, after creating the model and data, add:
-
-```python
-# Mixed precision context
-if args.mixed_precision:
-    amp_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-else:
-    amp_context = nullcontext()
-```
-
-Then pass it to `benchmark()`:
-
-```python
-times = benchmark(model, input_ids, args.mode,
-                  args.warmup_steps, args.measure_steps, amp_context)
-```
-
-Also add `print(f"Mixed precision: {args.mixed_precision}")` to the config printout in `main()`.
-
-That's it! Now running `--mixed_precision` wraps the forward pass in `torch.autocast`, which tells PyTorch to run matmuls in BF16 on tensor cores. Everything else (loss, backward) stays in FP32 automatically.
+That's it. Now `--mixed_precision` tells PyTorch to run matmuls in BF16 on tensor cores.
 
 ---
 
 ### mixed_precision_accumulation [5 pts]
 
-### What this section is about
+### What this sub-problem is about
 
-This exercise demonstrates why accumulating values in low precision is dangerous. When you add many small numbers to a running sum, FP16's limited precision causes the accumulated value to "stall" -- new small additions get rounded away to zero.
+Before we start using lower precision, this exercise shows **why low precision is dangerous for accumulation** (adding lots of small numbers together). This is the core reason mixed precision exists — you can't just do everything in FP16/BF16.
+
+### The intuition (why precision matters for adding)
+
+Imagine you have $8.00 in your bank account and someone deposits $0.01.
+- In FP32 (23 mantissa bits): Your balance becomes $8.01 — it can represent both 8 and 0.01 at the same time.
+- In FP16 (10 mantissa bits): The closest number to 8.01 it can represent is 8.0. So your deposit vanishes! The accumulator "stalls" because it can't represent the small difference.
+
+This is exactly what happens in LayerNorm (computing mean/variance) and loss functions — they sum many values, and precision loss accumulates.
 
 ### The code: `student/mixed_precision_test.py`
 
+We add 0.01 one thousand times. The correct answer is 10.0.
+
 ```python
-#!/usr/bin/env python3
-import torch
-
-# Snippet 1: FP32 accumulator + FP32 values
-s = torch.tensor(0, dtype=torch.float32)
-for i in range(1000):
-    s += torch.tensor(0.01, dtype=torch.float32)
-print(f"Snippet 1 — FP32 + FP32:       {s}")
-
-# Snippet 2: FP16 accumulator + FP16 values
-s = torch.tensor(0, dtype=torch.float16)
-for i in range(1000):
-    s += torch.tensor(0.01, dtype=torch.float16)
-print(f"Snippet 2 — FP16 + FP16:       {s}")
-
-# Snippet 3: FP32 accumulator + FP16 values
-s = torch.tensor(0, dtype=torch.float32)
-for i in range(1000):
-    s += torch.tensor(0.01, dtype=torch.float16)
-print(f"Snippet 3 — FP32 + FP16:       {s}")
-
-# Snippet 4: FP32 accumulator + explicit cast
-s = torch.tensor(0, dtype=torch.float32)
-for i in range(1000):
-    x = torch.tensor(0.01, dtype=torch.float16)
-    s += x.type(torch.float32)
-print(f"Snippet 4 — FP32 + FP16→FP32:  {s}")
-```
-
-### Expected results
-
-```
-Snippet 1 — FP32 + FP32:       10.000002
-Snippet 2 — FP16 + FP16:       9.9980    (or similar, NOT exactly 10.0)
-Snippet 3 — FP32 + FP16:       9.9951... (FP16 values lose precision before adding)
-Snippet 4 — FP32 + FP16→FP32:  9.9951... (same as 3, the damage happens at 0.01 creation)
+# Snippet 1: FP32 accumulator + FP32 values → best possible
+# Snippet 2: FP16 accumulator + FP16 values → precision loss (stalling)
+# Snippet 3: FP32 accumulator + FP16 values → better, but 0.01 is already imprecise in FP16
+# Snippet 4: FP32 accumulator + FP16→FP32 cast → same as 3 (damage already done at creation)
 ```
 
 ### How to run
@@ -1116,83 +1048,62 @@ Snippet 4 — FP32 + FP16→FP32:  9.9951... (same as 3, the damage happens at 0
 uv run python student/mixed_precision_test.py
 ```
 
-Or via SLURM:
-```bash
-sbatch student/run_1_1_5c.sbatch
+### Expected results
+
+```
+Snippet 1 — FP32 + FP32:       10.000002    ← nearly perfect
+Snippet 2 — FP16 + FP16:       9.9980       ← noticeably wrong (accumulator stalled)
+Snippet 3 — FP32 + FP16:       9.9951...    ← better than 2, but 0.01 was already imprecise in FP16
+Snippet 4 — FP32 + FP16→FP32:  9.9951...    ← same as 3 (casting doesn't recover lost precision)
 ```
 
-### Analysis
+### Why each snippet gives that result
 
-- **Snippet 1** (FP32 + FP32): Nearly perfect (10.000002). The tiny error is normal floating point rounding.
-- **Snippet 2** (FP16 + FP16): Noticeably off. FP16 has only ~3 decimal digits of precision. As `s` grows, adding 0.01 to a value like 8.0 loses the 0.01 because 8.01 cannot be represented exactly in FP16. The accumulator "stalls."
-- **Snippets 3 and 4**: The FP32 accumulator helps avoid stalling, but the damage is already done when 0.01 is stored in FP16 (it becomes 0.00999755859375). The accumulation is more accurate than Snippet 2 but still imperfect.
+- **Snippet 1** (FP32+FP32): Nearly perfect. FP32 has 23 mantissa bits — plenty of precision.
+- **Snippet 2** (FP16+FP16): The accumulator `s` is FP16. Once `s` grows past ~8.0, adding 0.01 gets rounded to 0 because FP16 can't represent the difference. The sum "stalls."
+- **Snippet 3** (FP32+FP16): The accumulator is FP32 (no stalling), but the value 0.01 is stored in FP16 as 0.00999755... — the damage happens at creation, not accumulation.
+- **Snippet 4** (FP32+cast): Explicitly casting FP16→FP32 doesn't help because 0.01 was already rounded when stored in FP16. You can't recover precision that's already lost.
+
+**Key takeaway**: This is why `torch.autocast` keeps accumulation-heavy operations (LayerNorm mean/variance, loss functions) in FP32 — to avoid this stalling problem.
 
 ### Deliverable answer for mixed_precision_accumulation
 
-> PENDING -- fill in actual output after running. Expected: FP32+FP32 gives ~10.0, FP16+FP16 gives a value noticeably less than 10.0 due to precision loss during accumulation. Using an FP32 accumulator with FP16 values (Snippets 3/4) is better than pure FP16 but still imperfect because the individual 0.01 values are already imprecise in FP16 representation.
+> PENDING — fill in actual output after running on HPC.
 
 ---
 
 ### (a) ToyModel dtype inspection
 
-### What this section is about
+### What this sub-problem is about
 
-We inspect what dtypes PyTorch actually uses inside `torch.autocast` for different operations. This shows that autocast is truly "mixed" -- not everything runs in FP16/BF16.
+The PDF gives us a small `ToyModel` with: `Linear → ReLU → LayerNorm → Linear`. We run it inside `torch.autocast(dtype=torch.float16)` and print the dtype at each stage to see which operations autocast downcasts and which it keeps in FP32.
 
-### The code: `student/toymodel_mixed_precision.py`
+This proves autocast is truly **"mixed"** — it's not just "run everything in FP16."
 
-```python
-#!/usr/bin/env python3
-import torch
-import torch.nn as nn
-
-class ToyModel(nn.Module):
-    def __init__(self, in_features: int, out_features: int):
-        super().__init__()
-        self.fc1 = nn.Linear(in_features, 10, bias=False)
-        self.ln = nn.LayerNorm(10)
-        self.fc2 = nn.Linear(10, out_features, bias=False)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.ln(x)
-        x = self.fc2(x)
-        return x
-
-model = ToyModel(20, 5).cuda()
-x = torch.randn(4, 20, device="cuda")
-target = torch.randint(0, 5, (4,), device="cuda")
-
-print(f"Model parameters dtype: {next(model.parameters()).dtype}")
-print()
-
-with torch.autocast(device_type="cuda", dtype=torch.float16):
-    print(f"Parameters inside autocast: {model.fc1.weight.dtype}")
-    fc1_out = model.relu(model.fc1(x))
-    print(f"After fc1 + relu (output dtype): {fc1_out.dtype}")
-    ln_out = model.ln(fc1_out)
-    print(f"After LayerNorm (output dtype):  {ln_out.dtype}")
-    logits = model.fc2(ln_out)
-    print(f"Logits dtype:                    {logits.dtype}")
-    loss = nn.functional.cross_entropy(logits, target)
-    print(f"Loss dtype:                      {loss.dtype}")
-
-loss.backward()
-print(f"Gradient dtype (fc1.weight.grad): {model.fc1.weight.grad.dtype}")
-```
-
-### Expected output
+### The ToyModel data flow (what autocast does to each layer)
 
 ```
-Model parameters dtype: torch.float32
-Parameters inside autocast: torch.float32     <-- weights stay FP32!
-After fc1 + relu (output dtype): torch.float16   <-- matmul output is FP16
-After LayerNorm (output dtype):  torch.float32   <-- LayerNorm outputs FP32
-Logits dtype:                    torch.float16   <-- matmul again: FP16
-Loss dtype:                      torch.float32   <-- cross_entropy: FP32
-Gradient dtype (fc1.weight.grad): torch.float32  <-- gradients are FP32
+Input (FP32)
+    ↓
+fc1 = Linear (matmul)  → autocast runs this in FP16 → output is FP16
+    ↓
+relu                    → stays FP16 (simple elementwise, no precision concern)
+    ↓
+LayerNorm               → autocast KEEPS this in FP32 (accumulation-sensitive!)
+    ↓
+fc2 = Linear (matmul)  → autocast runs this in FP16 → output is FP16
+    ↓
+cross_entropy loss      → computed in FP32 (loss needs precision)
+    ↓
+backward()              → gradients stored in FP32
 ```
+
+**Why this pattern?**
+- Matmuls (Linear layers) are the expensive 70-85% → run in FP16 for speed
+- LayerNorm computes mean/variance (accumulation!) → must stay FP32 (remember mixed_precision_test.py)
+- Loss function → must stay FP32 (small differences in loss guide training)
+- Gradients → FP32 (used to update weights, need to be accurate)
+- **Weights themselves never change dtype** — they stay FP32 in memory. Autocast just creates temporary FP16 copies for the computation.
 
 ### How to run
 
@@ -1200,105 +1111,114 @@ Gradient dtype (fc1.weight.grad): torch.float32  <-- gradients are FP32
 uv run python student/toymodel_mixed_precision.py
 ```
 
-### Analysis
+### Expected output
 
-Key observations:
-1. **Weights stay FP32** even inside autocast. Autocast only affects the computation, not the stored parameters.
-2. **Linear layers (matmuls)** produce FP16 output -- these are the "fast" operations on tensor cores.
-3. **LayerNorm** outputs FP32 -- normalization operations need higher precision to be numerically stable.
-4. **Cross-entropy loss** is computed in FP32 -- loss functions need precision for training stability.
-5. **Gradients are FP32** -- backpropagation happens in full precision to maintain training accuracy.
+```
+Model parameters dtype: torch.float32           ← weights are always FP32
+Parameters inside autocast: torch.float32       ← autocast doesn't change stored weights
+After fc1 + relu (output dtype): torch.float16  ← matmul ran in FP16
+After LayerNorm (output dtype):  torch.float32  ← LayerNorm stays FP32!
+Logits dtype:                    torch.float16  ← another matmul → FP16
+Loss dtype:                      torch.float32  ← cross_entropy stays FP32
+Gradient dtype (fc1.weight.grad): torch.float32 ← gradients are FP32
+```
 
 ### Deliverable answer for 1.1.5(a)
 
-> PENDING -- fill in after running. Expected: Model weights remain FP32 even inside autocast. Linear layer outputs are cast to FP16 (or BF16), while LayerNorm and cross-entropy loss remain in FP32 for numerical stability. Gradients are computed and stored in FP32.
+> PENDING — fill in actual output after running on HPC. The expected pattern is: model parameters remain FP32 even inside autocast. Linear layer (matmul) outputs are FP16. LayerNorm output is FP32 (accumulation-sensitive). Loss is FP32. Gradients are FP32.
 
 ---
 
 ### (b) LayerNorm and precision
 
-### What this section is about
+### What the question asks
 
-LayerNorm involves computing the mean and variance of activations, which requires high precision. If done in FP16, the mean/variance computation can lose significant accuracy, leading to training instability.
+The PDF asks: "FP16 autocast treats LayerNorm differently than Linear layers. What parts of LayerNorm are sensitive to precision? If we use BF16 instead of FP16, do we still need to keep LayerNorm in FP32?"
 
-### Why LayerNorm stays in FP32
+### Why LayerNorm needs FP32 (connecting to mixed_precision_accumulation)
 
 LayerNorm computes:
 ```
 y = (x - mean(x)) / sqrt(var(x) + eps) * gamma + beta
 ```
 
-The `mean(x)` and `var(x)` operations involve summing many values -- exactly the kind of accumulation that loses precision in FP16 (as we saw in mixed_precision_test.py). If the mean is even slightly off, the entire normalization is wrong, which cascades through the network.
+Step by step, here's what's precision-sensitive:
+1. **mean(x)** = sum all values / count → this is **accumulation** (adding many numbers together)
+2. **var(x)** = sum of (x - mean)² / count → also **accumulation**
 
-PyTorch's autocast keeps LayerNorm in FP32 specifically to avoid this problem. This is a design choice baked into the autocast implementation.
+This is exactly the problem from mixed_precision_test.py! When you sum many values in FP16, the accumulator stalls and you get the wrong answer. If the mean is even slightly off, the normalization is wrong, which cascades through the whole network.
+
+### Do we still need FP32 with BF16?
+
+**Yes.** BF16 has even fewer mantissa bits (7) than FP16 (10), so accumulation precision is actually **worse** with BF16. BF16's advantage is its larger range (8 exponent bits, no overflow), but that doesn't help with the accumulation problem. The mean/variance computation still needs FP32.
+
+This is why PyTorch's autocast keeps LayerNorm in FP32 regardless of whether you use FP16 or BF16.
 
 ### Deliverable answer for 1.1.5(b) [2-3 sentences]
 
-> LayerNorm requires computing the mean and variance of activations, which involves summing many values — exactly the kind of accumulation that loses precision in FP16 (as demonstrated in mixed_precision_accumulation). With FP16 autocast, PyTorch keeps LayerNorm in FP32 to avoid this numerical instability. If we use BF16 instead, the same concern applies to the mean/variance computation, so LayerNorm should still be kept in FP32 for stability, even though BF16 has better dynamic range than FP16 — the mantissa precision (7 bits) is actually worse than FP16 (10 bits), making accumulation errors even more likely.
+> The precision-sensitive parts of LayerNorm are the mean and variance computations, which involve summing many activation values — exactly the accumulation pattern that loses precision in low-precision formats (as demonstrated in mixed_precision_accumulation). With BF16 instead of FP16, we still need to keep LayerNorm in FP32 because BF16 has even fewer mantissa bits (7 vs 10), making accumulation errors worse despite its better dynamic range. PyTorch's autocast correctly keeps LayerNorm in FP32 for both FP16 and BF16 modes.
 
 ---
 
 ### (c) benchmarking_mixed_precision [5 pts]
 
-### What this section is about
+### What this sub-problem is about
 
-We re-run the full benchmarking sweep from 1.1.3(b) but with `--mixed_precision` enabled to see how much faster BF16 is compared to FP32.
+Now we actually measure how much faster BF16 is. We run each model size (small → 2.7B) with and without `--mixed_precision` and compare the forward+backward times.
 
-### How benchmark.py supports this
+### How it works in the code
 
-The `--mixed_precision` flag was already built into benchmark.py:
-
+In `benchmark.py`, we added:
 ```python
+# In main():
 if args.mixed_precision:
     amp_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 else:
-    amp_context = nullcontext()
-```
+    amp_context = nullcontext()   # does nothing — FP32 as usual
 
-And the amp_context wraps the forward pass:
-```python
+# In benchmark():
 with amp_context:
-    output = model(input_ids)
+    output = model(input_ids)   # matmuls inside run in BF16 if enabled
 ```
 
-This means:
-- **FP32 mode (default)**: `amp_context = nullcontext()`, so no precision change.
-- **BF16 mode (--mixed_precision)**: `amp_context = torch.autocast(...)`, so matmuls run in BF16.
+The backward pass does NOT need to be wrapped — PyTorch automatically computes gradients at the right precision based on what happened in the forward pass.
 
 ### How to run
 
 ```bash
-# Single example
-uv run python student/benchmark.py --model_size small --context_length 128 --mode both --mixed_precision
-
-# Full sweep via SLURM
 sbatch student/run_1_1_5c.sbatch
 ```
 
+This sbatch runs all three parts:
+1. `mixed_precision_test.py` — the accumulation exercise
+2. `toymodel_mixed_precision.py` — the dtype inspection for (a)
+3. FP32 vs BF16 benchmark for all 5 model sizes at ctx=128, mode=both
+
 ### Results
 
-**RESULTS PENDING -- run `sbatch student/run_1_1_5c.sbatch`**
-
-Expected result format:
+**RESULTS PENDING — run `sbatch student/run_1_1_5c.sbatch` on HPC**
 
 | Model | FP32 Fwd+Bwd (ms) | BF16 Fwd+Bwd (ms) | Speedup |
 |-------|--------------------|--------------------|---------|
-| small | 78.33 | ? | ? |
-| medium | 154.60 | ? | ? |
-| large | 273.11 | ? | ? |
-| xl | 457.88 | ? | ? |
-| 2.7B | 672.30 | ? | ? |
+| small | ? | ? | ? |
+| medium | ? | ? | ? |
+| large | ? | ? | ? |
+| xl | ? | ? | ? |
+| 2.7B | ? | ? | ? |
 
-### Analysis
+### What to expect
 
-Expected observations:
-- BF16 should be 1.3-2x faster than FP32, especially for larger models where matmul time dominates.
-- The speedup comes from A100 tensor cores processing BF16 matmuls at higher throughput (312 TFLOPS BF16 vs. 19.5 TFLOPS FP32).
-- Smaller models may see less speedup because overhead (kernel launch, memory copies) is a larger fraction of total time.
+- **BF16 should be 1.3-2x faster than FP32**, especially for larger models
+- **Why?** The A100 tensor cores process BF16 matmuls at 312 TFLOPS vs 19.5 TFLOPS for FP32 — 16x more raw throughput. But the overall speedup is less than 16x because:
+  - Not everything is matmul (LayerNorm, softmax stay FP32)
+  - Memory bandwidth is also a bottleneck (not just compute)
+  - Kernel launch overhead is the same regardless of precision
+- **Larger models benefit more** — they spend a bigger fraction of time in matmuls (the part that gets faster), so the overall speedup is larger
+- **Smaller models benefit less** — overhead is a larger fraction of their total time
 
-### Deliverable answer for 1.1.5(c)
+### Deliverable answer for 1.1.5(c) [2-3 sentences]
 
-> PENDING -- fill in after running. Expected: BF16 mixed precision provides a 1.3-2x speedup over FP32 for forward+backward passes, with larger models benefiting more because they spend a greater fraction of time in matmul operations that utilize tensor cores.
+> PENDING — fill in after running on HPC with actual numbers.
 
 ---
 
