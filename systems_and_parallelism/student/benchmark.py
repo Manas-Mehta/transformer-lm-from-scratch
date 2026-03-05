@@ -75,6 +75,8 @@ def parse_args():
                     help="Include AdamW optimizer step for 1.1.4(d)")
     parser.add_argument("--mixed_precision", action="store_true",
                     help="Use BF16 mixed precision (for Section 1.1.5)")
+    parser.add_argument("--profile_memory", action="store_true",
+                    help="Run memory profiling instead of timing (for Section 1.1.6)")
     parser.add_argument("--mode", type=str, default="both",
                         choices=["forward", "backward", "both"],
                         help="What to benchmark: forward only, backward only, or both")
@@ -219,6 +221,49 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=Non
     return times
 
 
+#-------        5b. profile_memory()                  -----------------------
+
+
+def profile_memory(model, input_ids, mode, warmup_steps, amp_context, args):
+    """Run one step with memory profiling. Saves a .pickle snapshot for pytorch.org/memory_viz."""
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    # Warmup with optimizer (so optimizer states are allocated before measurement)
+    for _ in range(warmup_steps):
+        optimizer.zero_grad()
+        with amp_context:
+            output = model(input_ids)
+        if mode in ("backward", "both"):
+            loss = output.sum()
+            loss.backward()
+            optimizer.step()
+        torch.cuda.synchronize()
+
+    # Reset and start recording
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.memory._record_memory_history(max_entries=1000000)
+
+    # One measured step with optimizer
+    optimizer.zero_grad()
+    with amp_context:
+        output = model(input_ids)
+    if mode in ("backward", "both"):
+        loss = output.sum()
+        loss.backward()
+        optimizer.step()
+    torch.cuda.synchronize()
+
+    # Save snapshot and report
+    mp_tag = "_bf16" if args.mixed_precision else "_fp32"
+    fname = f"memory_{args.model_size}_{args.context_length}_{args.mode}{mp_tag}.pickle"
+    torch.cuda.memory._dump_snapshot(fname)
+    torch.cuda.memory._record_memory_history(enabled=None)
+
+    peak_mem_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+    print(f"Memory snapshot saved to: {fname}")
+    print(f"Peak memory allocated: {peak_mem_mb:.1f} MB")
+
+
 #-------        6. main()                             -----------------------
 
 
@@ -255,6 +300,11 @@ def main():
         print("Mixed precision: BF16 ENABLED")
     else:
         amp_context = nullcontext()
+
+    # Memory profiling mode (1.1.6) — separate path
+    if args.profile_memory:
+        profile_memory(model, input_ids, args.mode, args.warmup_steps, amp_context, args)
+        return
 
     # Run benchmark
     times = benchmark(model, input_ids, args.mode,
