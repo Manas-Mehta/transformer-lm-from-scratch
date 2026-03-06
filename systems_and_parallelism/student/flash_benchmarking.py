@@ -102,6 +102,10 @@ def benchmark_config(seq_len, d_head, dtype, batch_size=1, warmup=100, rep=1000)
     except torch.cuda.OutOfMemoryError:
         torch.cuda.empty_cache()
         return None
+    except Exception as e:
+        torch.cuda.empty_cache()
+        print(f"  [ERROR] {type(e).__name__}: {e}")
+        return None
 
 
 def main():

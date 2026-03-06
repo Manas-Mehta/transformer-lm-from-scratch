@@ -1642,19 +1642,56 @@ for d_model, seq_len in itertools.product(d_models, seq_lens):
 uv run python student/benchmark_attention.py
 ```
 
-**RESULTS PENDING -- run on HPC**
+### Results
 
-Expected results format:
+**GPU: NVIDIA A100-SXM4-40GB** | batch_size=8 | warmup=10 | measure=100
 
-| d_model | seq_len | Fwd (ms) | Bwd (ms) | Memory (MB) | Notes |
-|---------|---------|----------|----------|-------------|-------|
-| 16 | 256 | ? | ? | ? | |
-| ... | ... | ... | ... | ... | |
-| 128 | 16384 | ? | ? | ? | OOM? |
+| d_model | seq_len | Fwd (ms) | Bwd (ms) | Mem after fwd (MB) | Notes |
+|---------|---------|----------|----------|-------------------|-------|
+| 16 | 256 | 0.40 | 2.67 | 20.7 | |
+| 16 | 1024 | 0.73 | 2.20 | 212.2 | |
+| 16 | 4096 | 7.59 | 26.00 | 3,116.0 | |
+| 16 | 8192 | 28.27 | 96.65 | 12,397.8 | |
+| 16 | 16384 | OOM | OOM | OOM | |
+| 32 | 256 | 0.39 | 1.27 | 53.4 | |
+| 32 | 1024 | 0.68 | 2.15 | 214.9 | |
+| 32 | 4096 | 7.92 | 26.45 | 3,127.0 | |
+| 32 | 8192 | 29.15 | 98.48 | 12,425.8 | |
+| 32 | 16384 | OOM | OOM | OOM | |
+| 64 | 256 | 0.38 | 1.27 | 78.4 | |
+| 64 | 1024 | 0.70 | 2.22 | 220.4 | |
+| 64 | 4096 | 8.37 | 27.38 | 3,149.0 | |
+| 64 | 8192 | 30.97 | 102.12 | 12,481.8 | |
+| 64 | 16384 | OOM | OOM | OOM | |
+| 128 | 256 | 0.38 | 1.26 | 128.4 | |
+| 128 | 1024 | 0.76 | 2.34 | 231.4 | |
+| 128 | 4096 | 9.21 | 29.14 | 3,193.0 | |
+| 128 | 8192 | 34.41 | 109.12 | 12,593.8 | |
+| 128 | 16384 | OOM | OOM | OOM | |
 
-### Deliverable answer for pytorch_attention [table + 1-2 paragraph response]
+### Analysis
 
-> PENDING -- fill in after running. Report the timings table, note which configs OOM, do the memory accounting for one config that OOMs (batch x seq^2 x 4 bytes for FP32 attention scores), explain how backward memory scales with seq_len (saved attention matrix for gradient computation), and mention FlashAttention as the solution to eliminate the O(n^2) memory.
+1. **All configs OOM at seq_len=16384.** The attention score matrix has shape `(batch, seq_len, seq_len)`. At seq_len=16384: `8 x 16384 x 16384 x 4 bytes = 32 GB` just for the attention scores in FP32 — this exceeds the A100's 40 GB when you add Q, K, V, the mask, and the output tensors.
+
+2. **Memory scales quadratically with seq_len, not d_model.** At d_model=64: memory goes from 78 MB (seq=256) to 220 MB (seq=1024, 4x length = ~3x memory) to 3,149 MB (seq=4096, 16x length = ~40x memory) to 12,482 MB (seq=8192, 32x length = ~160x memory). The dominant cost is the `(batch, seq_len, seq_len)` attention matrix, which is independent of d_model. The small d_model-dependent increase (~20-130 MB at seq=256) comes from Q, K, V storage.
+
+3. **Forward time also scales quadratically.** For d=64: 0.38ms (256) → 0.70ms (1024) → 8.37ms (4096) → 30.97ms (8192). Going from 256 to 8192 (32x) increases time by ~81x, consistent with O(n^2) scaling from the two matmuls (QK^T and PV).
+
+4. **Backward is ~3x forward** for larger configs (e.g., d=64 seq=8192: 102ms bwd vs 31ms fwd = 3.3x). The backward pass must compute gradients for Q, K, and V, requiring roughly 2x the matmul FLOPs of forward, plus it reads/writes the saved attention matrix.
+
+5. **Memory accounting for the smallest OOM config (d=16, seq=16384)**:
+   - Attention scores S: `8 x 16384 x 16384 x 4 = 32,768 MB` (32 GB)
+   - Q, K, V: `3 x 8 x 16384 x 16 x 4 = 24 MB` (negligible)
+   - Causal mask: `16384 x 16384 x 1 = 256 MB`
+   - Total: ~33 GB, well over the 40 GB limit once you add the softmax output P (another 32 GB) and the output O.
+
+6. **How backward memory scales**: The backward pass needs the saved attention matrix P of shape `(batch, seq_len, seq_len)` for gradient computation. This is the same O(n^2) cost as forward. At seq=8192, ~12.4 GB is in use after forward — the backward then needs additional memory for gradient tensors, pushing total usage higher. This is exactly the problem FlashAttention solves by never materializing the full attention matrix.
+
+### Deliverable answer for pytorch_attention
+
+> **Table**: See results above. All configurations OOM at seq_len=16384 regardless of d_model, because the attention score matrix requires `8 x 16384^2 x 4 = 32 GB` in FP32 — leaving no room on the 40 GB A100 for the softmax output, gradients, and other tensors. Memory after the forward pass is dominated by the O(n^2) attention scores: ~78 MB at seq=256 growing to ~12.5 GB at seq=8192 for d=64, with d_model contributing only a small additive term for Q/K/V storage.
+>
+> The backward pass saves the full attention matrix P for gradient computation, so backward memory also scales as O(n^2). Forward time scales quadratically (~0.4ms at seq=256 to ~31ms at seq=8192), and backward is consistently ~3x forward. To eliminate this O(n^2) memory bottleneck, FlashAttention computes attention in tiles using online softmax, never materializing the full attention matrix — reducing memory from O(n^2) to O(n) and often improving speed by keeping data in fast GPU SRAM.
 
 ---
 
@@ -1712,11 +1749,81 @@ compiled_model = torch.compile(model)
 
 **Deliverable**: A table comparing vanilla vs. compiled Transformer model for forward, backward, and optimizer steps.
 
-**RESULTS PENDING -- build the script and run on HPC**
+### 1.3(a) Results — Compiled Attention
+
+**GPU: NVIDIA A100-SXM4-40GB** | batch_size=8 | warmup=10 | measure=100 | `torch.compile: ENABLED`
+
+| d_model | seq_len | Fwd (ms) | Bwd (ms) | Mem after fwd (MB) |
+|---------|---------|----------|----------|-------------------|
+| 16 | 256 | 0.28 | 15.45 | 16.9 |
+| 16 | 1024 | 0.59 | 4.70 | 148.8 |
+| 16 | 4096 | 4.01 | 14.63 | 2,094.3 |
+| 16 | 8192 | 16.71 | 54.58 | 8,306.3 |
+| 16 | 16384 | 56.82 | 539.32 | 33,108.3 |
+| 32 | 256 | 0.37 | 2.96 | 73.6 |
+| 32 | 1024 | 0.51 | 1.57 | 152.0 |
+| 32 | 4096 | 5.07 | 16.30 | 2,107.3 |
+| 32 | 8192 | 18.19 | 58.33 | 8,338.3 |
+| 32 | 16384 | 62.27 | 479.21 | 33,172.3 |
+| 64 | 256 | 0.37 | 1.00 | 122.9 |
+| 64 | 1024 | 0.63 | 1.63 | 158.5 |
+| 64 | 4096 | 4.96 | 16.44 | 2,133.3 |
+| 64 | 8192 | 16.99 | 57.89 | 8,402.3 |
+| 64 | 16384 | 69.40 | 233.90 | 33,300.3 |
+| 128 | 256 | 0.37 | 1.03 | 221.4 |
+| 128 | 1024 | 0.69 | 1.74 | 171.5 |
+| 128 | 4096 | 5.82 | 18.19 | 2,185.3 |
+| 128 | 8192 | 20.44 | 64.84 | 8,530.3 |
+| 128 | 16384 | 83.18 | 261.44 | 33,556.3 |
+
+#### Compiled vs Vanilla Comparison (selected configs)
+
+| d_model | seq_len | Vanilla Fwd | Compiled Fwd | Fwd Speedup | Vanilla Bwd | Compiled Bwd | Bwd Speedup |
+|---------|---------|-------------|-------------|-------------|-------------|-------------|-------------|
+| 16 | 256 | 0.40 | 0.28 | 1.43x | 2.67 | 15.45 | 0.17x |
+| 16 | 4096 | 7.59 | 4.01 | 1.89x | 26.00 | 14.63 | 1.78x |
+| 16 | 8192 | 28.27 | 16.71 | 1.69x | 96.65 | 54.58 | 1.77x |
+| 64 | 4096 | 8.37 | 4.96 | 1.69x | 27.38 | 16.44 | 1.67x |
+| 64 | 8192 | 30.97 | 16.99 | 1.82x | 102.12 | 57.89 | 1.76x |
+| 128 | 8192 | 34.41 | 20.44 | 1.68x | 109.12 | 64.84 | 1.68x |
+| 16 | 16384 | OOM | 56.82 | — | OOM | 539.32 | — |
+| 64 | 16384 | OOM | 69.40 | — | OOM | 233.90 | — |
+| 128 | 16384 | OOM | 83.18 | — | OOM | 261.44 | — |
+
+#### Analysis
+
+1. **Forward pass: ~1.5-1.9x speedup.** `torch.compile` fuses elementwise operations (softmax, scaling, masking) into optimized Triton kernels, reducing memory round-trips. The speedup is consistent across configurations.
+
+2. **Backward pass: ~1.7x speedup at larger configs, but anomalous at small sizes.** At d=16, seq=256 the compiled backward (15.45ms) is much slower than vanilla (2.67ms) — this is likely residual compilation overhead or a suboptimal compiled graph for very small tensors. At larger sizes the backward consistently shows ~1.7x speedup.
+
+3. **seq_len=16384 no longer OOMs!** The vanilla attention OOM'd at seq=16384 for all d_model values, but the compiled version succeeds. `torch.compile` can optimize memory by eliminating intermediate tensors (e.g., fusing the softmax computation so the full attention score matrix isn't separately materialized). However, memory is still O(n²) — at seq=16384 we see ~33 GB usage, which just barely fits on the 40 GB A100.
+
+4. **Memory usage is similar to vanilla** for configs that didn't OOM (e.g., d=64 seq=8192: 12,482 MB vanilla vs 8,402 MB compiled — actually ~33% less). The compile pass may be able to avoid some intermediate allocations.
+
+### 1.3(b) Results — Compiled Full Model
+
+| Model Size | Mode | Forward (ms) | Full Step (ms) | Fwd Speedup | Full Speedup |
+|-----------|------|-------------|---------------|-------------|-------------|
+| small | vanilla | 38.78 | 87.33 | — | — |
+| small | compiled | 10.24 | 40.10 | 3.79x | 2.18x |
+| medium | vanilla | 79.22 | 183.19 | — | — |
+| medium | compiled | 30.87 | 123.84 | 2.57x | 1.48x |
+| large | vanilla | 116.21 | 336.14 | — | — |
+| large | compiled | 63.61 | 261.63 | 1.83x | 1.28x |
+
+#### Analysis
+
+1. **Huge forward speedups (1.8-3.8x)**, especially for the small model where kernel launch overhead dominates — `torch.compile` fuses many small operations into fewer, larger kernels.
+
+2. **Full step speedups are smaller (1.3-2.2x)** because the backward pass and optimizer step benefit less from fusion. The backward pass involves more diverse operations that are harder to fuse.
+
+3. **Diminishing returns for larger models.** The small model benefits most (3.79x fwd) because it has many small operations ripe for fusion. Larger models already have bigger matmuls that are compute-bound, leaving less room for fusion gains.
 
 ### Deliverable answers for torch_compile
 
-> PENDING -- fill in after running. Expected: torch.compile should provide modest speedups (1.1-1.5x) for attention by fusing elementwise operations. For the full model, speedups may be more significant because there are more fusion opportunities across layers. The compiled version should NOT fix the O(n^2) memory problem -- that requires FlashAttention.
+> **(a)** Compiled attention is ~1.5-1.9x faster in the forward pass and ~1.7x faster in the backward pass at practical sizes (seq ≥ 1024). Notably, `torch.compile` eliminates OOM at seq_len=16384 by fusing operations and avoiding some intermediate tensor materializations — though memory remains O(n²) at ~33 GB. At very small configs (d=16, seq=256), compilation overhead can make the backward pass slower.
+>
+> **(b)** Compiled full model shows 1.8-3.8x forward speedup and 1.3-2.2x full-step speedup. The small model benefits most because it has many small fusible operations. Larger models see diminishing returns as compute-bound matmuls dominate. Neither compiled attention nor compiled full model eliminates the fundamental O(n²) memory scaling — that requires FlashAttention.
 
 ---
 
@@ -2014,7 +2121,18 @@ This test runs on GPU and checks both `is_causal=False` and `is_causal=True`.
 
 > A Triton kernel implementing FlashAttention-2 forward pass, wrapped in a `torch.autograd.Function`. Must pass `test_flash_forward_pass_triton`.
 
-**RESULTS PENDING -- implement and test**
+**All tests passed (6/6):**
+
+| Test | Status |
+|------|--------|
+| `test_flash_forward_pass_pytorch` | PASSED |
+| `test_flash_forward_pass_triton[False]` (non-causal) | PASSED |
+| `test_flash_forward_pass_triton[True]` (causal) | PASSED |
+| `test_flash_backward_pytorch` | PASSED |
+| `test_flash_backward_triton[False]` (non-causal) | PASSED |
+| `test_flash_backward_triton[True]` (causal) | PASSED |
+
+All 6 tests passed in 24.11s on A100. Two minor warnings (cuBLAS context initialization and TensorFloat32 precision suggestion) — neither affects correctness.
 
 ---
 
@@ -2102,18 +2220,61 @@ uv run python student/flash_benchmarking.py
 
 ### Results
 
-**RESULTS PENDING -- run on HPC**
+**GPU: NVIDIA A100-SXM4-40GB** | batch_size=1 | causal=True | warmup=100, rep=1000
 
-Expected output format:
+#### BFloat16 Results (selected highlights)
 
-| dtype | d_head | seq_len | FA2 fwd | FA2 bwd | FA2 e2e | Van fwd | Van bwd | Van e2e | Fwd spdup | E2E spdup |
-|-------|--------|---------|---------|---------|---------|---------|---------|---------|-----------|-----------|
-| bf16  | 16     | 128     | ?       | ?       | ?       | ?       | ?       | ?       | ?         | ?         |
-| ...   | ...    | ...     | ...     | ...     | ...     | ...     | ...     | ...     | ...       | ...       |
+| d_head | seq_len | FA2 fwd | FA2 bwd | FA2 e2e | Van fwd | Van bwd | Van e2e | Fwd spdup | E2E spdup |
+|--------|---------|---------|---------|---------|---------|---------|---------|-----------|-----------|
+| 16 | 128 | 0.009ms | 0.710ms | 0.719ms | 0.246ms | 0.868ms | 1.114ms | 27.51x | 1.55x |
+| 16 | 4096 | 0.051ms | 0.756ms | 0.808ms | 0.508ms | 1.102ms | 1.610ms | 9.92x | 1.99x |
+| 16 | 8192 | 0.140ms | 1.745ms | 1.885ms | 1.872ms | 3.954ms | 5.826ms | 13.34x | 3.09x |
+| 16 | 32768 | 1.191ms | 26.714ms | 27.905ms | 27.758ms | 60.671ms | 88.429ms | 23.30x | 3.17x |
+| 64 | 128 | 0.011ms | 0.770ms | 0.781ms | 0.243ms | 0.939ms | 1.182ms | 21.84x | 1.51x |
+| 64 | 4096 | 0.114ms | 0.754ms | 0.869ms | 0.516ms | 1.087ms | 1.603ms | 4.52x | 1.85x |
+| 64 | 8192 | 0.286ms | 2.747ms | 3.033ms | 1.914ms | 3.966ms | 5.880ms | 6.69x | 1.94x |
+| 64 | 32768 | 2.523ms | 40.099ms | 42.622ms | 28.214ms | 60.515ms | 88.729ms | 11.18x | 2.08x |
+| 128 | 128 | 0.017ms | 0.745ms | 0.762ms | 0.246ms | 0.880ms | 1.127ms | 14.80x | 1.48x |
+| 128 | 4096 | 0.202ms | 1.187ms | 1.389ms | 0.536ms | 1.125ms | 1.661ms | 2.65x | 1.20x |
+| 128 | 8192 | 0.775ms | 4.220ms | 4.994ms | 1.962ms | 4.037ms | 5.999ms | 2.53x | 1.20x |
+| 128 | 32768 | 7.610ms | 62.593ms | 70.202ms | 28.938ms | 61.297ms | 90.236ms | 3.80x | 1.29x |
+
+All d_head values OOM at seq_len=65536 for both FA2 and vanilla.
+
+#### Float32 Results (selected highlights)
+
+| d_head | seq_len | FA2 fwd | FA2 bwd | FA2 e2e | Van fwd | Van bwd | Van e2e | Fwd spdup | E2E spdup |
+|--------|---------|---------|---------|---------|---------|---------|---------|-----------|-----------|
+| 16 | 4096 | 0.071ms | 0.660ms | 0.731ms | 0.808ms | 1.824ms | 2.632ms | 11.45x | 3.60x |
+| 16 | 32768 | 1.767ms | 31.495ms | 33.262ms | 45.560ms | 104.104ms | 149.664ms | 25.78x | 4.50x |
+| 32 | 8192 | 0.262ms | 2.229ms | 2.491ms | 3.037ms | 6.759ms | 9.797ms | 11.61x | 3.93x |
+| 32 | 32768 | 3.005ms | 34.797ms | 37.802ms | 46.886ms | 105.912ms | 152.799ms | 15.60x | 4.04x |
+| 64 | 8192 | 0.943ms | 3.496ms | 4.439ms | 3.473ms | 7.871ms | 11.344ms | 3.68x | 2.56x |
+| 64 | 32768 | 9.306ms | 52.282ms | 61.587ms | 53.808ms | 120.031ms | 173.838ms | 5.78x | 2.82x |
+
+**Note**: fp32 d_head=128 results are missing from the output — the script appears to have completed without running this sweep (possibly a silent OOM during tensor creation or a script flow issue). Only bf16 d_head=128 and fp32 d_head≤64 results were produced.
+
+All d_head values OOM at seq_len=65536 for fp32.
+
+#### Analysis
+
+1. **FA2 forward is dramatically faster (2.5-27x speedup)**. The Triton kernel processes attention in tiles within SRAM, avoiding the O(n²) global memory reads/writes. The speedup is largest at small d_head (more tiles, more savings per tile) and increases with sequence length because vanilla attention's O(n²) memory traffic grows quadratically while FA2's tiled approach scales more efficiently.
+
+2. **E2E speedup is modest (1.2-4.5x)**. The backward pass uses `torch.compile` (not a custom Triton kernel), so it doesn't get the same SRAM tiling benefit as the forward. At bf16 d=128 the E2E speedup is only 1.2-1.3x because the backward dominates and the compiled backward isn't much faster than vanilla backward.
+
+3. **fp32 shows larger E2E speedups than bf16.** At d=16 seq=32768: fp32 E2E speedup is 4.50x vs bf16's 3.17x. This is because vanilla fp32 attention is penalized by 2x larger tensors (double memory bandwidth), while the FA2 Triton forward accumulates in fp32 internally regardless — the extra memory bandwidth cost hits vanilla attention harder.
+
+4. **Speedup decreases with increasing d_head.** At bf16 seq=8192: d=16 gets 13.34x fwd speedup while d=128 gets only 2.53x. With larger d_head, the matmul computation per tile grows (O(B_q × B_k × d)), so the compute-to-memory ratio increases and vanilla attention becomes relatively more efficient. FA2's advantage is primarily in *memory access*, not compute.
+
+5. **Both implementations OOM at seq=65536** (batch=1). At 65536 with bf16: even FA2's O(n) memory for Q,K,V is `3 × 65536 × 128 × 2 = 48 MB` — manageable, but the backward pass still materializes O(n²) attention scores since we used `torch.compile` rather than a tiled Triton backward. The vanilla attention OOMs for the same reason as Section 1.2: the attention score matrix is `65536² × 2 = 8 GB` in bf16.
+
+6. **FA2 backward is the bottleneck.** The backward times dominate total runtime (e.g., at bf16 d=64 seq=32768: fwd=2.5ms vs bwd=40ms). A Triton-based backward kernel (like the full FlashAttention-2 paper describes) would dramatically improve E2E performance, but is outside the scope of this assignment.
 
 ### Deliverable answer for flash_benchmarking
 
-> PENDING -- fill in after running. Expected: FA2 should show significant speedups at longer sequence lengths (4096+) due to O(n) vs O(n^2) memory and tiled SRAM computation. At very short sequences, vanilla attention may be competitive due to lower kernel launch overhead. BF16 should be faster than FP32 for both implementations.
+> The Triton FA2 forward kernel achieves 2.5-27x speedup over vanilla PyTorch attention, with the largest gains at small d_head and long sequences where vanilla attention's O(n²) memory traffic dominates. End-to-end (forward + backward) speedup is more modest at 1.2-4.5x because the backward pass uses `torch.compile` rather than a tiled Triton kernel, so it still benefits from some fusion but not the full SRAM tiling advantage.
+>
+> Key trends: (1) Speedup increases with sequence length — FA2's tiled approach scales better than O(n²). (2) Speedup decreases with d_head — larger heads make matmuls compute-bound, reducing FA2's memory-access advantage. (3) fp32 benefits more than bf16 (4.5x vs 3.2x E2E at seq=32768) because vanilla fp32 pays 2x the memory bandwidth cost while FA2's forward accumulates in fp32 regardless. (4) Both implementations OOM at seq=65536 — FA2's forward would survive, but the backward (which materializes O(n²) attention) causes the OOM. A full Triton backward would fix this.
 
 ---
 
@@ -2121,10 +2282,9 @@ Expected output format:
 
 | File | What it contains |
 |------|-----------------|
-| `student/benchmark_attention.py` | Benchmarks naive attention (1.2) and torch.compile (1.3) |
-| `student/flash_attention.py` | FlashAttention-2 implementations -- PyTorch (1.3.2 flash_forward a), Triton (1.3.2 flash_forward b), backward (1.3.2 flash_backward) |
+| `student/benchmark_attention.py` | Benchmarks naive attention (1.2) and torch.compile (1.3a, 1.3b) |
+| `student/flash_attention.py` | FlashAttention-2: PyTorch forward (a), Triton forward (b), causal (c), backward |
 | `student/flash_benchmarking.py` | FA2 vs vanilla attention benchmarking (1.3.2 flash_benchmarking) |
-| `student/run_1_2.sbatch` | SLURM script for 1.2 attention + 1.3 torch.compile benchmarks |
-| `student/run_1_3_tests.sbatch` | SLURM script to run FlashAttention tests on GPU |
-| `student/run_1_3_bench.sbatch` | SLURM script for flash_benchmarking |
-| `tests/adapters.py` | Hook up your implementations to the test suite |
+| `student/run_1_2.sbatch` | SLURM script for Section 1.2 (pytorch_attention) |
+| `student/run_1_3.sbatch` | SLURM script for all Section 1.3 (compile + flash tests + benchmarks) |
+| `tests/adapters.py` | Hook up implementations to the test suite |
