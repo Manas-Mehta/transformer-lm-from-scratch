@@ -544,192 +544,33 @@ This script runs the small model with `--mode both` and `--warmup_steps` set to 
 
 ### What this section is about
 
-Nsight Systems (`nsys`) is NVIDIA's system-wide profiler. It records a timeline of everything happening on GPU (kernel launches, memory copies, CUDA API calls) and lets us visualize where time is actually spent. To make the profiler output useful, we'll add **NVTX annotations** to our benchmark.py so we can label regions like "warmup", "forward", "backward" in the profiler timeline.
+Nsight Systems (`nsys`) is NVIDIA's system-wide profiler that records GPU kernel launches, memory copies, and CUDA API calls on a timeline. We add **NVTX annotations** to `benchmark.py` to label regions ("warmup", "forward", "backward") in the profiler output.
 
 ### Key concepts
 
-#### What is `nsys`?
+- **nsys**: Command-line GPU profiler. Wrap your command with `nsys profile ...` to record a trace (`.nsys-rep`). Use `nsys stats <file>` for text summaries.
+- **NVTX**: Named markers in code (e.g., `with nvtx.range("forward"): ...`) that show up as labeled regions on the profiler timeline.
+- **Monkey-patching**: Replacing the staff's `scaled_dot_product_attention` at runtime with our NVTX-annotated version to profile attention sub-operations.
 
-`nsys` is a command-line profiler from NVIDIA. You wrap your normal Python command with `nsys profile ...` and it records a trace file (`.nsys-rep`) that you can open in Nsight Systems GUI. Think of it as a "flight recorder" for your GPU.
+### Implementation summary
 
-#### What is NVTX?
-
-**NVTX** (NVIDIA Tools Extension) lets you add *named markers* to your code. When the profiler records a trace, these markers show up as labeled regions on the timeline. Without NVTX, you'd just see a wall of GPU kernels with cryptic names. With NVTX, you can see "this is the forward pass", "this is the backward pass", "this is the QK matmul", etc.
-
-In PyTorch:
-```python
-import torch.cuda.nvtx as nvtx
-
-with nvtx.range("forward"):
-    output = model(input_ids)  # this region is now labeled "forward" in the profiler
-```
-
-#### What is monkey-patching?
-
-Monkey-patching means replacing a function at runtime. The staff's model calls `a1_basics.model.scaled_dot_product_attention(...)` inside its attention layers. We can replace this function with our own annotated version, and the model will call our version instead — without modifying the staff's code:
-
-```python
-import a1_basics.model
-a1_basics.model.scaled_dot_product_attention = our_annotated_version
-```
-
-### What we need to change in benchmark.py
-
-We need to make **4 changes** to benchmark.py:
-
-1. **Add imports** for NVTX, math, and the a1_basics module
-2. **Add NVTX ranges to `benchmark()`** — wrap warmup, measurement, forward, backward
-3. **Add `annotated_scaled_dot_product_attention()`** — a new function for 1.1.4(e)
-4. **Add `--nvtx_attention` flag** — to optionally monkey-patch the attention function
-5. **Add the monkey-patch logic in `main()`**
-
-### Step-by-step: building the code
-
-#### Step 1: Add new imports
-
-At the top of `benchmark.py`, add these imports:
-
-```python
-import math
-import torch.cuda.nvtx as nvtx   # NVTX annotations for nsys profiling
-import a1_basics.model            # needed for monkey-patching attention
-```
-
-You already have `from a1_basics.model import BasicsTransformerLM` — keep that. The new `import a1_basics.model` gives you access to the module-level function `a1_basics.model.scaled_dot_product_attention` which we'll replace later.
-
-#### Step 2: Add `--nvtx_attention` flag to `parse_args()`
-
-In your `parse_args()` function, add this argument:
-
-```python
-parser.add_argument("--nvtx_attention", action="store_true",
-                    help="Enable NVTX-annotated attention for 1.1.4(e)")
-```
-
-This is a boolean flag — when you pass `--nvtx_attention` on the command line, `args.nvtx_attention` is `True`.
-
-#### Step 3: Wrap `benchmark()` with NVTX ranges
-
-Currently your `benchmark()` function looks like this (simplified):
-
-```python
-def benchmark(model, input_ids, mode, warmup_steps, measure_steps):
-    # warmup
-    for _ in range(warmup_steps):
-        ...
-    # measurement
-    times = []
-    for i in range(measure_steps):
-        ...
-    return times
-```
-
-Wrap each section with `nvtx.range(...)`:
-
-```python
-def benchmark(model, input_ids, mode, warmup_steps, measure_steps):
-    # ─── Phase 1: Warm-up ───
-    with nvtx.range("warmup"):                         # <-- NEW
-        for _ in range(warmup_steps):
-            if mode in ("backward", "both"):
-                model.zero_grad(set_to_none=True)
-            output = model(input_ids)
-            if mode in ("backward", "both"):
-                loss = output.sum()
-                loss.backward()
-            torch.cuda.synchronize()
-
-    # ─── Phase 2: Measurement ───
-    times = []
-    with nvtx.range("measurement"):                    # <-- NEW
-        for i in range(measure_steps):
-            if mode in ("backward", "both"):
-                model.zero_grad(set_to_none=True)
-
-            torch.cuda.synchronize()
-            start = timeit.default_timer()
-
-            with nvtx.range(f"step_{i}"):               # <-- NEW
-                with nvtx.range("forward"):              # <-- NEW
-                    output = model(input_ids)
-
-                if mode in ("backward", "both"):
-                    with nvtx.range("backward"):         # <-- NEW
-                        loss = output.sum()
-                        loss.backward()
-
-            torch.cuda.synchronize()
-            end = timeit.default_timer()
-            times.append(end - start)
-
-    return times
-```
-
-The NVTX ranges have **zero overhead** on your actual timing (they only affect the profiler). In nsys, you'll now be able to filter by these ranges to isolate warmup vs. measurement, forward vs. backward.
-
-#### Step 4: Add the annotated attention function
-
-Add this function after `generate_random_batch()` and before `benchmark()`:
-
-```python
-def annotated_scaled_dot_product_attention(Q, K, V, mask=None):
-    """NVTX-annotated version of the staff's attention function.
-    Used for 1.1.4(e) to compare softmax vs matmul time."""
-    d_k = K.shape[-1]
-
-    with nvtx.range("attention_matmul_QK"):
-        attention_scores = torch.einsum("...qd,...kd->...qk", Q, K) / math.sqrt(d_k)
-
-    if mask is not None:
-        attention_scores = torch.where(mask, attention_scores, float("-inf"))
-
-    with nvtx.range("attention_softmax"):
-        attention_weights = torch.softmax(attention_scores, dim=-1)
-
-    with nvtx.range("attention_matmul_V"):
-        output = torch.einsum("...qk,...kd->...qd", attention_weights, V)
-
-    return output
-```
-
-This is essentially the same logic as the staff's `scaled_dot_product_attention`, but with NVTX ranges around each sub-operation. The `math.sqrt(d_k)` is why we added `import math` earlier.
-
-#### Step 5: Add monkey-patch logic in `main()`
-
-In `main()`, right after parsing args and printing the config (before `create_model`), add:
-
-```python
-# Monkey-patch attention with NVTX annotations if requested (for 1.1.4e)
-if args.nvtx_attention:
-    a1_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
-    print("NVTX attention annotations: ENABLED")
-```
-
-That's it! When you run with `--nvtx_attention`, the staff model will call your annotated version instead of its own, and nsys will show separate timing for QK matmul, softmax, and V matmul.
+Changes to `benchmark.py`:
+1. Added `import math`, `import torch.cuda.nvtx as nvtx`, `import a1_basics.model`
+2. Wrapped warmup/measurement/forward/backward loops with `nvtx.range(...)` in `benchmark()`
+3. Added `annotated_scaled_dot_product_attention()` with NVTX ranges around QK matmul, softmax, and V matmul
+4. Added `--nvtx_attention` flag to monkey-patch the attention function
+5. Added `--optimizer` flag for full training step profiling (part d)
 
 ### How to run
 
-The SLURM script `student/run_1_1_4.sbatch` runs `nsys profile` for various model sizes, context lengths, and modes:
-
 ```bash
 sbatch student/run_1_1_4.sbatch
-```
 
-An individual `nsys` command looks like:
-
-```bash
+# Individual run example:
 uv run nsys profile -o profiles/fwd_small_128 --force-overwrite true \
   python student/benchmark.py --model_size small --context_length 128 \
   --mode forward --warmup_steps 5 --measure_steps 1
 ```
-
-Key `nsys` flags:
-- `-o <name>` -- output file name (produces `<name>.nsys-rep`)
-- `--force-overwrite true` -- overwrite existing trace files
-
-To get text stats: `nsys stats profiles/fwd_small_128.nsys-rep`
-
-To view traces visually, download the `.nsys-rep` file to your local machine and open it in the Nsight Systems GUI app.
 
 ---
 
@@ -835,43 +676,21 @@ Look beyond the top GEMM entry in the kernel summary table.
 
 **Question**: How does the fraction of time spent on matrix multiplication change when running a full training step (forward + backward + optimizer) vs. forward-only?
 
-The assignment asks for a **complete training step**: forward → loss → backward → optimizer.step().
-We added `--optimizer` flag to benchmark.py that creates an AdamW optimizer and calls `optimizer.step()` after each backward pass.
+Added `--optimizer` flag to `benchmark.py` (creates AdamW, calls `optimizer.step()` after backward with NVTX range).
 
-#### What we changed in benchmark.py for (d)
-
-1. **Added `--optimizer` flag** in `parse_args()`
-2. **Created AdamW optimizer** in `main()` when `--optimizer` is set
-3. **Added `optimizer.step()` with NVTX range** in `benchmark()` after backward pass
-
-Run with `--mode both --optimizer`:
-```bash
-nsys profile --trace cuda,nvtx --stats=true \
-  --output profiles/train_small_128 --force-overwrite=true \
-  uv run python student/benchmark.py --model_size small --context_length 128 \
-  --mode both --optimizer --warmup_steps 3 --measure_steps 1
-```
-
-**Previous RESULTS (without optimizer)** — Forward vs Backward NVTX ranges:
+**Forward vs Backward NVTX timing** (without optimizer, from parts a-c profiling):
 
 | Model | ctx | Forward (ms) | Backward (ms) | Step total (ms) | Backward/Forward |
 |-------|-----|-------------|--------------|-----------------|-----------------|
 | small | 128 | 36.2 | 39.5 | 75.7 | 1.09x |
-| small | 256 | 35.7 | 39.6 | 75.3 | 1.11x |
-| small | 512 | 36.5 | 40.1 | 76.6 | 1.10x |
 | small | 1024 | 36.7 | 121.6 | 158.3 | 3.31x |
 | medium | 128 | 72.7 | 77.8 | 150.5 | 1.07x |
-| medium | 256 | 71.1 | 91.6 | 162.8 | 1.29x |
 | medium | 512 | 73.5 | 245.4 | 318.9 | 3.34x |
-| medium | 1024 | 92.8 | 621.5 | 714.4 | 6.70x |
 | large | 128 | 106.8 | 126.5 | 233.3 | 1.18x |
 | large | 256 | 107.7 | 253.5 | 361.3 | 2.35x |
-| large | 512 | 151.5 | 588.0 | 739.6 | 3.88x |
 | xl | 128 | 144.9 | 255.4 | 400.4 | 1.76x |
-| xl | 256 | 176.3 | 592.2 | 768.6 | 3.36x |
-| xl | 512 | 357.6 | 1170.2 | 1527.8 | 3.27x |
 
-**RESULTS WITH OPTIMIZER** (from `sbatch student/run_1_1_4d.sbatch`):
+**Full training step with optimizer** (from `run_1_1_4d.sbatch`):
 
 | Model | ctx | Forward (ms) | Backward (ms) | Optimizer (ms) | Step total (ms) | Optim % of step |
 |-------|-----|-------------|--------------|----------------|-----------------|-----------------|
@@ -899,37 +718,19 @@ The optimizer adds `multi_tensor_apply_kernel` entries (~15% of GPU kernel time)
 
 **Question**: Compare the runtime of the softmax operation versus the matrix multiplication operations within the self-attention layer during a forward pass. How does the difference in runtimes compare to the difference in FLOPs?
 
-Run with `--nvtx_attention` to enable the annotated attention function:
+Run with `--nvtx_attention` to monkey-patch attention with NVTX ranges around QK matmul, softmax, and V matmul.
 
-```bash
-uv run nsys profile -o profiles/attn_small_128 --force-overwrite true \
-  python student/benchmark.py --model_size small --context_length 128 \
-  --mode forward --warmup_steps 5 --measure_steps 1 --nvtx_attention
-```
+**Results** — Attention kernel breakdown (GPU kernel times):
 
-In the nsys output, filter by NVTX ranges to see:
-- `attention_matmul_QK` — the Q×K^T matrix multiplication
-- `attention_softmax` — the softmax operation
-- `attention_matmul_V` — the attention_weights × V multiplication
-
-**RESULTS** — Attention kernel breakdown with `--nvtx_attention` (GPU kernel times):
-
-| Model | ctx | softmax kernel (ms) | softmax % | All sgemm (ms) | sgemm % |
-|-------|-----|-------------------|-----------|----------------|---------|
+| Model | ctx | softmax (ms) | softmax % | All sgemm (ms) | sgemm % |
+|-------|-----|-------------|-----------|----------------|---------|
 | small | 128 | 0.37 | 0.7% | ~37.9 | ~74.6% |
 | small | 256 | 0.97 | 0.9% | ~85.7 | ~85.5% |
 | small | 512 | 3.85 | 1.9% | ~169.6 | ~82.1% |
 | small | 1024 | 14.52 | 3.6% | ~314.1 | ~78.7% |
 | medium | 128 | 0.95 | 0.6% | ~141.6 | ~84.8% |
 
-The softmax kernel (`softmax_warp_forward`) is tiny compared to GEMM. As context length increases from 128→1024, softmax grows from 0.7% to 3.6% of GPU time.
-
-**FLOPs comparison** (for attention with seq_len S, head_dim d_k):
-- QK^T matmul: O(S² × d_k) FLOPs
-- Softmax: O(S²) FLOPs
-- V matmul: O(S² × d_k) FLOPs
-
-With d_k = 64 (small model: 768/12 heads), matmul has ~64x more FLOPs than softmax per attention head. The runtime ratio (~80% vs ~1-4%) reflects this FLOPs gap, though softmax's share grows with context length because it becomes more memory-bandwidth-bound while matmul remains compute-bound.
+**FLOPs comparison**: With head_dim d_k=64, each matmul does O(S^2 x d_k) FLOPs while softmax does O(S^2) -- matmul has ~64x more FLOPs. The runtime ratio (~80% vs ~1-4%) reflects this gap. Softmax's share grows with context length because it becomes memory-bandwidth-bound while matmul remains compute-bound.
 
 ### Deliverable answer for 1.1.4(e) [1-2 sentences]
 
