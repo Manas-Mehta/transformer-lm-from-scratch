@@ -8,7 +8,7 @@
 #SBATCH --error=logs/%j_1_2.err
 #SBATCH --requeue
 
-# ─── 1.2: Benchmarking PyTorch Attention + torch.compile ───
+# ─── 1.2 + 1.3: Benchmarking PyTorch Attention + torch.compile ───
 
 singularity exec --bind /scratch --nv \
   --overlay /scratch/mm14444/overlay-25GB-500K.ext3:ro \
@@ -25,20 +25,20 @@ singularity exec --bind /scratch --nv \
     echo "============================================"
     echo ""
 
-    # ─── 1.2.1(a) Vanilla attention ───
-    echo ">>> 1.2.1(a) Vanilla PyTorch Attention <<<"
+    # ─── 1.2(a) Vanilla attention ───
+    echo ">>> 1.2(a) Vanilla PyTorch Attention <<<"
     echo "==========================================="
     uv run python student/benchmark_attention.py
     echo ""
 
-    # ─── 1.2.2(a) Compiled attention ───
-    echo ">>> 1.2.2(a) Compiled PyTorch Attention <<<"
+    # ─── 1.3(a) Compiled attention ───
+    echo ">>> 1.3(a) Compiled PyTorch Attention <<<"
     echo "============================================"
     uv run python student/benchmark_attention.py --compiled
     echo ""
 
-    # ─── 1.2.2(b) Compiled full model ───
-    echo ">>> 1.2.2(b) Compiled Full Model <<<"
+    # ─── 1.3(b) Compiled full model ───
+    echo ">>> 1.3(b) Compiled Full Model <<<"
     echo "======================================"
     uv run python student/benchmark_attention.py --full_model
     echo ""

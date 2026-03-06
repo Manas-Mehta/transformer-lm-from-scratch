@@ -1365,15 +1365,25 @@ uv run python student/benchmark.py \
 
 This produces two `.pickle` files. Upload them to https://pytorch.org/memory_viz to visualize.
 
-**RESULTS PENDING — run `sbatch student/run_1_1_6.sbatch`**
+**RESULTS:**
 
-**How to interpret the memory timeline**:
-- **Forward-only**: You should see memory climb as each layer's activations are computed, then flatten. No gradient or optimizer memory.
-- **Full training step**: Memory climbs during forward (activations saved), peaks during backward (gradients allocated), then drops as activations are freed. A final bump appears for the optimizer step (AdamW momentum + variance updates).
+- **Forward-only (FP32, ctx=128)**: Peak memory = **23,845.1 MB**. Pickle saved as `memory_2.7B_128_forward_fp32.pickle`.
+- **Full training (FP32, ctx=128)**: **OOM** — crashed at `optimizer.step()` trying to allocate AdamW's `exp_avg_sq` states. The 2.7B model uses ~10 GB for parameters alone; adding gradients (~10 GB) and AdamW states (~20 GB for momentum + variance) exceeds the A100's 40 GB.
+
+**How to interpret the memory timeline** (for the forward-only pickle that succeeded):
+- **Forward-only**: Memory climbs as each layer's activations are computed, then flattens. No gradient or optimizer memory.
+- **Full training step**: Would show three phases (forward climb → backward peak → optimizer bump), but OOM'd because the 2.7B model's parameter + optimizer state memory alone fills the entire 40 GB GPU.
+
+**How to get the memory timeline images (deliverable)**:
+1. On HPC: `scp /scratch/mm14444/transformer-lm-from-scratch/systems_and_parallelism/memory_profiles/memory_2.7B_128_forward_fp32.pickle` to your local machine
+2. Go to https://pytorch.org/memory_viz
+3. Upload the `.pickle` file
+4. Screenshot the "Active Memory Timeline" view
+5. Repeat for any other pickle files that were saved
 
 ### Deliverable answer for 1.1.6(a) [2-3 sentences]
 
-> PENDING — fill in after running. Expected: The forward-only timeline shows a steady climb as activations accumulate across layers. The full training step shows three distinct phases: (1) forward pass where memory grows as activations are saved, (2) backward pass where memory peaks as gradients are computed and activations are freed, and (3) optimizer step where a brief allocation occurs for AdamW state updates.
+> The forward-only memory timeline for the 2.7B model at ctx=128 shows a steady climb to 23,845 MB as activations accumulate across the 32 transformer layers, then flattens — there are no gradients or optimizer states. The full training step (forward + backward + optimizer) could not complete because the 2.7B model requires ~40 GB just for parameters (10 GB) + gradients (10 GB) + AdamW states (20 GB), leaving no room for activations on the 40 GB A100. This demonstrates that the 2.7B model cannot be trained on a single A100 without techniques like gradient checkpointing, model parallelism, or reduced precision.
 
 ---
 
@@ -1392,19 +1402,21 @@ for CTX in 128 256 512; do
 done
 ```
 
-**RESULTS PENDING — run `sbatch student/run_1_1_6.sbatch`**
-
-Expected format:
+**RESULTS:**
 
 | Context Length | Forward Peak (MB) | Full Training Peak (MB) |
 |---------------|-------------------|------------------------|
-| 128 | ? | ? |
-| 256 | ? | ? |
-| 512 | ? | ? |
+| 128 | 23,845.1 | OOM |
+| 256 | 36,607.4 | OOM |
+| 512 | OOM | OOM |
+
+- Forward ctx=128→256: memory jumps from 23.8 GB to 36.6 GB (+12.8 GB). This increase is dominated by activation memory scaling with context length.
+- Forward ctx=512: OOM — the activation memory at 512 context length pushes past 40 GB even in forward-only mode.
+- All "full training" runs OOM because AdamW optimizer states alone need ~20 GB on top of the ~10 GB model parameters.
 
 ### Deliverable answer for 1.1.6(b)
 
-> PENDING — fill in after running. Expected: Peak memory increases with context length because activation memory scales with `batch_size × context_length × d_model × num_layers`. Full training uses significantly more than forward-only because it stores activations for the backward pass, plus gradients and optimizer states.
+> Peak forward-only memory scales steeply with context length: 23,845 MB at ctx=128, 36,607 MB at ctx=256, and OOM at ctx=512. All full training runs (forward + backward + optimizer) OOM'd because the 2.7B model's parameter + gradient + AdamW state memory (~40 GB) fills the entire A100 before any activations can be allocated. This illustrates that activation memory scales with `batch_size × context_length × d_model × num_layers`, and at longer contexts, even inference alone can exceed GPU capacity.
 
 ---
 
@@ -1424,11 +1436,22 @@ uv run python student/benchmark.py \
   --model_size 2.7B --context_length 128 --mode both --profile_memory --mixed_precision --warmup_steps 5
 ```
 
-**RESULTS PENDING — run `sbatch student/run_1_1_6.sbatch`**
+**RESULTS:**
+
+| Mode | Precision | Peak Memory (MB) |
+|------|-----------|-----------------|
+| Forward, ctx=128 | FP32 | 23,845.1 |
+| Forward, ctx=128 | BF16 | 32,826.2 |
+| Full training, ctx=128 | FP32 | OOM |
+| Full training, ctx=128 | BF16 | OOM |
+
+**Surprising result**: BF16 forward uses **more** memory than FP32 forward (32,826 vs 23,845 MB — about 9 GB more!).
+
+**Why**: `torch.autocast` does NOT convert model weights to BF16. It keeps all parameters in FP32 and creates **temporary BF16 copies** of the weights just for matmuls. During the forward pass, both the FP32 originals and BF16 copies exist in memory simultaneously. PyTorch's autocast weight caching mechanism also retains these BF16 copies across the forward pass to reuse them. So you end up with ~1.5x the parameter memory instead of saving memory.
 
 ### Deliverable answer for 1.1.6(c) [2-3 sentences]
 
-> PENDING — fill in after running. Expected: BF16 reduces memory somewhat because activations are stored in half precision (2 bytes vs 4 bytes). However, model parameters, gradients, and optimizer states remain in FP32 under autocast, so total savings are less than 2x. The savings are most visible at longer context lengths where activation memory dominates.
+> Counterintuitively, `torch.autocast` with BF16 **increases** peak memory from 23,845 MB to 32,826 MB for the forward pass (+37%). This is because autocast keeps model parameters in FP32 and creates temporary BF16 copies for matmul operations — both versions coexist in GPU memory. For true memory savings, you would need to convert the model weights themselves to BF16 (e.g., `model.bfloat16()`), rather than relying on autocast which is designed for speed, not memory reduction.
 
 ---
 
@@ -1463,11 +1486,11 @@ At context_length=1024: `4 × 1024 × 2560 × 4 = 41,943,040 bytes = 40.0 MB`
 
 Upload the forward-only `.pickle` file to https://pytorch.org/memory_viz. Use the "Detail" slider to filter — at ~10%, only the 10% largest allocations are shown.
 
-**RESULTS PENDING — run `sbatch student/run_1_1_6.sbatch`, then visualize the pickle file**
+**HOW TO GET THIS**: Upload `memory_2.7B_128_forward_fp32.pickle` to https://pytorch.org/memory_viz. Use the "Detail" slider to reduce to ~10% — this filters to show only the largest allocations.
 
 ### Deliverable answer for 1.1.6(e) [1-2 sentences]
 
-> PENDING — fill in after running. Expected: The largest allocations should be ~5 MB each (matching our calculation in (d)) and come from the residual stream activations at each transformer layer. The stack traces should point to the forward pass of each `TransformerBlock`, specifically the output of attention and feed-forward sublayers.
+> When reducing the Detail slider to ~13% (371 of 2867 entries), the largest allocations form a dominant blue staircase pattern climbing from ~5 GiB to ~22 GiB. These are the residual stream activation tensors at each transformer layer — each ~5 MB (batch=4 × ctx=128 × d_model=2560 × 4 bytes), and there are 32 layers' worth stacking up. The stack traces point to the forward pass of each `TransformerBlock`, specifically the output tensors from the attention and feed-forward sublayers.
 
 ---
 
@@ -1512,7 +1535,7 @@ sbatch student/run_1_1_6.sbatch
 
 # Section 1.2 -- Optimizing Attention with FlashAttention-2
 
-## 1.2.1 Benchmarking PyTorch Attention
+## 1.2 Benchmarking PyTorch Attention
 
 ### What this section is about
 
@@ -1635,7 +1658,7 @@ Expected results format:
 
 ---
 
-## 1.2.2 torch.compile (Problem: torch_compile, 5 points)
+## 1.3 torch.compile (Problem: torch_compile, 5 points)
 
 ### What this section is about
 
@@ -1697,7 +1720,7 @@ compiled_model = torch.compile(model)
 
 ---
 
-## 1.3 FlashAttention-2
+### FlashAttention-2 — Overview (covers 1.3.1 and 1.3.2)
 
 ### What this section is about
 
@@ -1776,7 +1799,7 @@ Key Triton concepts:
 
 ---
 
-### 1.3.2 Problem (flash_forward): 25 points
+### 1.3.2(a) Problem (flash_forward): 25 points
 
 **(a)** Write a **pure PyTorch** (no Triton) `autograd.Function` that implements the FlashAttention-2 forward pass.
 
@@ -2012,7 +2035,7 @@ if is_causal:
 
 ---
 
-### 1.3.3 Problem (flash_backward): 10 points
+### 1.3.2 Problem (flash_backward): 10 points
 
 Implement the backward pass using PyTorch (not Triton) and `torch.compile`.
 
@@ -2037,11 +2060,11 @@ This is implemented in `student/flash_attention.py` as `_flash_backward_impl()`,
 
 ---
 
-### 1.3.4 Problem (flash_benchmarking): 15 points
+### 1.3.2 Problem (flash_benchmarking): 15 points
 
 **(a)** Write a benchmarking script using `triton.testing.do_bench` that compares:
 - Triton FlashAttention-2 forward + backward
-- Regular PyTorch attention forward + backward
+- Regular PyTorch attention forward + backward (staff's `scaled_dot_product_attention`)
 
 Sweep over:
 - Sequence lengths: powers of 2 from 128 to 65536
@@ -2049,18 +2072,59 @@ Sweep over:
 - Precisions: `torch.bfloat16` and `torch.float32`
 - Batch size: 1, causal masking: True
 
-**Deliverable**: A table comparing Triton FA2 vs PyTorch attention (forward, backward, end-to-end latencies).
+### What this does
 
-**RESULTS PENDING -- implement and run on HPC**
+The script (`student/flash_benchmarking.py`) uses `triton.testing.do_bench` to measure:
+1. **Forward only**: Time the forward pass alone for both implementations
+2. **End-to-end**: Time forward + backward together
+3. **Backward**: Computed as end-to-end minus forward
+
+For each config, it reports the FA2 speedup over vanilla attention. At short sequences, vanilla attention may be faster (less overhead). At long sequences, FA2's O(n) memory and tiled computation should dominate.
+
+### How `triton.testing.do_bench` works
+
+```python
+# do_bench runs the function many times and returns the median time in ms
+ms = triton.testing.do_bench(lambda: my_function(), warmup=100, rep=1000)
+```
+
+Unlike manual timing with `timeit`, `do_bench` handles warmup, synchronization, and statistical robustness automatically. It's the standard way to benchmark GPU kernels in Triton.
+
+### How to run
+
+```bash
+# Via SLURM
+sbatch student/run_1_3_bench.sbatch
+
+# Interactive
+uv run python student/flash_benchmarking.py
+```
+
+### Results
+
+**RESULTS PENDING -- run on HPC**
+
+Expected output format:
+
+| dtype | d_head | seq_len | FA2 fwd | FA2 bwd | FA2 e2e | Van fwd | Van bwd | Van e2e | Fwd spdup | E2E spdup |
+|-------|--------|---------|---------|---------|---------|---------|---------|---------|-----------|-----------|
+| bf16  | 16     | 128     | ?       | ?       | ?       | ?       | ?       | ?       | ?         | ?         |
+| ...   | ...    | ...     | ...     | ...     | ...     | ...     | ...     | ...     | ...       | ...       |
+
+### Deliverable answer for flash_benchmarking
+
+> PENDING -- fill in after running. Expected: FA2 should show significant speedups at longer sequence lengths (4096+) due to O(n) vs O(n^2) memory and tiled SRAM computation. At very short sequences, vanilla attention may be competitive due to lower kernel launch overhead. BF16 should be faster than FP32 for both implementations.
 
 ---
 
-## Summary of all files for Section 1.2/1.3
+## Summary of all files for Section 1.2 / 1.3
 
 | File | What it contains |
 |------|-----------------|
-| `student/benchmark_attention.py` | Benchmarks naive attention (1.2.1) and torch.compile (1.2.2) |
-| `student/flash_attention.py` | FlashAttention-2 implementations -- PyTorch (1.3.2a), Triton (1.3.2b), backward (1.3.3) |
-| `student/run_1_2.sbatch` | SLURM script for attention + torch.compile benchmarks |
+| `student/benchmark_attention.py` | Benchmarks naive attention (1.2) and torch.compile (1.3) |
+| `student/flash_attention.py` | FlashAttention-2 implementations -- PyTorch (1.3.2 flash_forward a), Triton (1.3.2 flash_forward b), backward (1.3.2 flash_backward) |
+| `student/flash_benchmarking.py` | FA2 vs vanilla attention benchmarking (1.3.2 flash_benchmarking) |
+| `student/run_1_2.sbatch` | SLURM script for 1.2 attention + 1.3 torch.compile benchmarks |
 | `student/run_1_3_tests.sbatch` | SLURM script to run FlashAttention tests on GPU |
+| `student/run_1_3_bench.sbatch` | SLURM script for flash_benchmarking |
 | `tests/adapters.py` | Hook up your implementations to the test suite |

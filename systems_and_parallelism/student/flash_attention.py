@@ -2,9 +2,9 @@
 FlashAttention-2 Implementations
 
 Contains:
-  - FlashAttentionPyTorch: Pure PyTorch implementation (Section 1.3.2a)
-  - FlashAttentionTriton: Triton kernel implementation (Section 1.3.2b)
-  - flash_backward: Backward pass using PyTorch + torch.compile (Section 1.3.3)
+  - FlashAttentionPyTorch: Pure PyTorch implementation (1.3.2 flash_forward a)
+  - FlashAttentionTriton: Triton kernel implementation (1.3.2 flash_forward b)
+  - flash_backward: Backward pass using PyTorch + torch.compile (1.3.2 flash_backward)
 """
 
 import math
@@ -118,7 +118,7 @@ class FlashAttentionPyTorch(torch.autograd.Function):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Backward pass (Section 1.3.3 — flash_backward)
+#  Backward pass (1.3.2 — flash_backward)
 #  Uses PyTorch + torch.compile, following Equations 13-19 from the PDF.
 # ──────────────────────────────────────────────────────────────────────────
 

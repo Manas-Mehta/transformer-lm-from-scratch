@@ -1,11 +1,11 @@
 """
-Section 1.2.1 — pytorch_attention: Benchmark PyTorch attention at different scales
-Section 1.2.2 — torch_compile: Benchmark compiled attention and compiled full model
+Section 1.2 — pytorch_attention (5 pts): Benchmark PyTorch attention at different scales
+Section 1.3 — torch_compile (5 pts): Benchmark compiled attention and compiled full model
 
 Usage:
-    uv run python student/benchmark_attention.py                    # Part (a): vanilla attention
-    uv run python student/benchmark_attention.py --compiled         # Part (a): + torch.compile attention
-    uv run python student/benchmark_attention.py --full_model       # Part (b): compiled full model
+    uv run python student/benchmark_attention.py                    # 1.2(a): vanilla attention
+    uv run python student/benchmark_attention.py --compiled         # 1.3(a): + torch.compile attention
+    uv run python student/benchmark_attention.py --full_model       # 1.3(b): compiled full model
 """
 
 import argparse
@@ -17,7 +17,7 @@ from a1_basics.model import scaled_dot_product_attention, BasicsTransformerLM
 
 
 def benchmark_attention():
-    """1.2.1(a): Benchmark vanilla PyTorch attention at various scales."""
+    """1.2(a): Benchmark vanilla PyTorch attention at various scales."""
     args = parse_args()
 
     batch_size = 8
@@ -92,7 +92,7 @@ def benchmark_attention():
 
 
 def benchmark_full_model():
-    """1.2.2(b): Benchmark compiled vs vanilla full Transformer model."""
+    """1.3(b): Benchmark compiled vs vanilla full Transformer model."""
     from student.benchmark import MODEL_CONFIGS, create_model, generate_random_batch
 
     args = parse_args()
@@ -163,9 +163,9 @@ def benchmark_full_model():
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark attention")
     parser.add_argument("--compiled", action="store_true",
-                        help="Use torch.compile for attention (1.2.2a)")
+                        help="Use torch.compile for attention (1.3a)")
     parser.add_argument("--full_model", action="store_true",
-                        help="Benchmark compiled full model (1.2.2b)")
+                        help="Benchmark compiled full model (1.3b)")
     return parser.parse_args()
 
 
