@@ -32,23 +32,23 @@ GPU: NVIDIA A100-SXM4-40GB
 
 ## 1.1.4(a) nsys vs timeit
 
-> PENDING — needs real nsys output from HPC. Run `sbatch student/run_1_1_4.sbatch`.
+> The nsys `:measurement` NVTX range matches our timeit results almost exactly (within 0.1 ms), e.g., small ctx=128 gives 48.32 ms from timeit vs 48.34 ms from nsys. This is expected because both measure the same wall-clock interval using `torch.cuda.synchronize()`.
 
 ## 1.1.4(b) Dominant GPU Kernel
 
-> PENDING — needs real nsys CUDA kernel summary from HPC.
+> The CUDA kernel with the most cumulative GPU time is `ampere_sgemm_128x64_tn` (matrix multiplication), e.g., 50.4% of GPU time with 222 invocations for small ctx=128, and all `ampere_sgemm_*` variants together account for 70-94% across all configs. The same GEMM kernel type dominates in forward+backward, though the backward pass adds additional sgemm/cutlass variants for transposed gradient computations.
 
 ## 1.1.4(c) Other Non-Trivial Kernels
 
-> PENDING — needs real nsys CUDA kernel summary from HPC.
+> Besides matrix multiplications, the main non-trivial kernels are: elementwise kernels for activation functions and residual additions (~6-10%), reduction kernels for LayerNorm mean/variance and softmax max (~3%), and sigmoid/exp kernels for SiLU activation and softmax (~1%). These correspond to the non-matmul transformer operations and together account for ~15-22% of forward pass GPU time, shrinking as model size grows.
 
 ## 1.1.4(d) Full Training Step
 
-> PENDING — needs real nsys profiling of full training step from HPC.
+> In a full training step, the matmul fraction drops from ~78% (forward-only) to ~64% of GPU kernel time (small ctx=128). The backward pass adds elementwise gradient kernels and transposed matmul variants, while the AdamW optimizer adds `multi_tensor_apply_kernel` entries (~17% of GPU time) for fused momentum/variance/weight updates, though the optimizer wall-clock time is very cheap (~3 ms, <3% of step time).
 
 ## 1.1.4(e) Softmax vs Matmul in Attention
 
-> PENDING — needs real nsys attention kernel breakdown from HPC.
+> From CUDA kernel profiling, softmax-related kernels (`reduce_kernel MaxOps` + `exp_kernel`) take ~1-2% of GPU time while all `ampere_sgemm_*` matmul kernels take 79-85%, consistent with the ~64x FLOPs difference (matmul does O(S^2 * d_k) vs softmax's O(S^2) with d_k=64). Matmul also better utilizes the GPU's tensor cores (compute-bound) while softmax is memory-bandwidth-bound, further widening the runtime gap.
 
 ---
 
