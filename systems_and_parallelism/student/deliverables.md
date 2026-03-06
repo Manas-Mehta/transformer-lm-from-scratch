@@ -32,23 +32,23 @@ GPU: NVIDIA A100-SXM4-40GB
 
 ## 1.1.4(a) nsys vs timeit
 
-> The total forward pass time reported by nsys matches our timeit measurements almost exactly (within <1 ms), e.g., small model ctx=128 gives 36.83 ms from timeit vs 36.85 ms from nsys. This is expected because both methods use `torch.cuda.synchronize()` to ensure all GPU work completes before measuring, so they capture the same wall-clock interval.
+> PENDING — needs real nsys output from HPC. Run `sbatch student/run_1_1_4.sbatch`.
 
 ## 1.1.4(b) Dominant GPU Kernel
 
-> The CUDA kernel with the most cumulative GPU time is `ampere_sgemm_*` (matrix multiplication), accounting for 70-85% of forward pass time across all model sizes. For example, in the medium model at ctx=128, `ampere_sgemm_32x128_tn` alone takes 59.9% with 576 invocations. The same GEMM kernel type dominates in forward+backward mode, as the backward pass also performs matrix multiplications for gradient computation.
+> PENDING — needs real nsys CUDA kernel summary from HPC.
 
 ## 1.1.4(c) Other Non-Trivial Kernels
 
-> Besides matrix multiplications, the main non-trivial kernels are: elementwise kernels for activation functions and residual additions (~4-6%), reduction kernels for LayerNorm (mean/variance) and softmax (~3-4%), and the sigmoid/exp kernels for SiLU activation and softmax (~2%). These correspond to the non-matmul transformer operations: LayerNorm, activation functions, attention softmax, and embedding lookup.
+> PENDING — needs real nsys CUDA kernel summary from HPC.
 
 ## 1.1.4(d) Full Training Step
 
-> In a full training step (forward + backward + AdamW optimizer), the matmul fraction drops from ~70-85% (forward-only) to ~63-70% of GPU kernel time. The backward pass adds elementwise gradient kernels, and the AdamW optimizer adds fused multi-tensor kernels for momentum/variance/weight updates (~15% of GPU time), though the optimizer wall-clock time is very cheap (~3ms, <3% of step time) since these are simple elementwise operations.
+> PENDING — needs real nsys profiling of full training step from HPC.
 
 ## 1.1.4(e) Softmax vs Matmul in Attention
 
-> Softmax takes a tiny fraction of attention runtime compared to the matrix multiplications: ~0.7% at ctx=128 growing to ~3.6% at ctx=1024 for the small model, while the two matmul operations (QK^T and V) together account for ~75-85%. This matches the FLOPs difference -- matmul computes O(S^2*d_k) FLOPs with head_dim d_k=64, roughly 64x more than softmax's O(S^2), and matmul is also more compute-bound (better utilizing tensor cores) while softmax is memory-bandwidth-bound.
+> PENDING — needs real nsys attention kernel breakdown from HPC.
 
 ---
 

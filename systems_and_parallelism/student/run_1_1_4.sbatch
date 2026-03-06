@@ -9,9 +9,10 @@
 #SBATCH --requeue
 
 # ─── 1.1.4: Nsight Systems Profiling ───
-# Profile all model sizes × context lengths with nsys
-# Generates .nsys-rep files + text stats for each combo
-# Large models with context 1024 may OOM — that's expected, script continues
+# (a) Forward pass timing: nsys vs timeit
+# (b)(c) CUDA kernel breakdown (which kernels dominate)
+# (d) Full training step (fwd + bwd + optimizer)
+# (e) Softmax vs matmul in attention (--nvtx_attention)
 
 singularity exec --bind /scratch --nv \
   --overlay /scratch/mm14444/overlay-25GB-500K.ext3:ro \
@@ -20,40 +21,39 @@ singularity exec --bind /scratch --nv \
     source /ext3/miniconda3/etc/profile.d/conda.sh
     export PATH=/ext3/miniconda3/bin:$PATH
 
-    # ─── Add nsys to PATH (installed via NSYS_doc.pdf instructions) ───
+    # Add nsys to PATH (per NSYS_doc.pdf)
     NSYS_DIR=$(dirname $(find ~/tools/nsight-systems -type f -name nsys -perm -111 2>/dev/null | head -n1) 2>/dev/null)
     if [ -n "$NSYS_DIR" ]; then
         export PATH=$NSYS_DIR:$PATH
         echo "nsys found at: $(which nsys)"
+        echo "nsys version: $(nsys --version)"
     else
-        echo "ERROR: nsys not found! Run the install steps from NSYS_doc.pdf first."
+        echo "ERROR: nsys not found! Install per NSYS_doc.pdf first."
         exit 1
     fi
 
     cd /scratch/mm14444/transformer-lm-from-scratch/systems_and_parallelism
+    mkdir -p profiles
 
     echo "============================================"
     echo "  1.1.4 — Nsight Systems Profiling"
     echo "  Date: $(date)"
     echo "  GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader)"
-    echo "  nsys: $(nsys --version)"
     echo "============================================"
+
+    # ─── (a)(b)(c): Forward pass with CUDA kernel stats ───
     echo ""
-
-    mkdir -p profiles
-
-    # ─── (a)(b)(c): Profile forward pass for all model sizes ───
-    echo ">>> FORWARD PASS PROFILES <<<"
+    echo ">>> SECTION (a)(b)(c): FORWARD PASS — CUDA KERNEL BREAKDOWN <<<"
     for SIZE in small medium large xl 2.7B; do
         for CTX in 128 256 512 1024; do
             echo ""
-            echo "--- Profiling: $SIZE, ctx=$CTX, mode=forward ---"
-            nsys profile \
-                --trace nvtx \
+            echo "====== $SIZE, ctx=$CTX, mode=forward ======"
+            uv run nsys profile \
+                --trace cuda,nvtx \
                 --stats=true \
                 --output "profiles/fwd_${SIZE}_${CTX}" \
                 --force-overwrite=true \
-                uv run python student/benchmark.py \
+                python student/benchmark.py \
                 --model_size "$SIZE" \
                 --context_length "$CTX" \
                 --mode forward \
@@ -63,43 +63,44 @@ singularity exec --bind /scratch --nv \
         done
     done
 
-    # ─── (d): Profile full training step (forward + backward) ───
+    # ─── (d): Full training step with optimizer ───
     echo ""
     echo ""
-    echo ">>> FULL TRAINING STEP PROFILES (forward+backward) <<<"
-    for SIZE in small medium large xl 2.7B; do
-        for CTX in 128 256 512 1024; do
+    echo ">>> SECTION (d): FULL TRAINING STEP (fwd + bwd + optimizer) <<<"
+    for SIZE in small medium; do
+        for CTX in 128 256 512; do
             echo ""
-            echo "--- Profiling: $SIZE, ctx=$CTX, mode=both ---"
-            nsys profile \
-                --trace nvtx \
+            echo "====== $SIZE, ctx=$CTX, mode=both + optimizer ======"
+            uv run nsys profile \
+                --trace cuda,nvtx \
                 --stats=true \
-                --output "profiles/both_${SIZE}_${CTX}" \
+                --output "profiles/train_${SIZE}_${CTX}" \
                 --force-overwrite=true \
-                uv run python student/benchmark.py \
+                python student/benchmark.py \
                 --model_size "$SIZE" \
                 --context_length "$CTX" \
                 --mode both \
-                --warmup_steps 5 \
+                --optimizer \
+                --warmup_steps 3 \
                 --measure_steps 1 \
             || echo "FAILED (likely OOM) — skipping"
         done
     done
 
-    # ─── (e): Profile with NVTX-annotated attention (softmax vs matmul) ───
+    # ─── (e): NVTX-annotated attention (softmax vs matmul) ───
     echo ""
     echo ""
-    echo ">>> NVTX ATTENTION PROFILES (for softmax vs matmul comparison) <<<"
+    echo ">>> SECTION (e): NVTX ATTENTION — SOFTMAX vs MATMUL <<<"
     for SIZE in small medium; do
         for CTX in 128 256 512 1024; do
             echo ""
-            echo "--- Profiling attention: $SIZE, ctx=$CTX ---"
-            nsys profile \
-                --trace nvtx \
+            echo "====== attention: $SIZE, ctx=$CTX ======"
+            uv run nsys profile \
+                --trace cuda,nvtx \
                 --stats=true \
                 --output "profiles/attn_${SIZE}_${CTX}" \
                 --force-overwrite=true \
-                uv run python student/benchmark.py \
+                python student/benchmark.py \
                 --model_size "$SIZE" \
                 --context_length "$CTX" \
                 --mode forward \
@@ -113,7 +114,5 @@ singularity exec --bind /scratch --nv \
     echo ""
     echo "============================================"
     echo "  Done! $(date)"
-    echo "  Profile files in: profiles/"
-    echo "  Stats printed above (--stats=true)"
     echo "============================================"
 '
