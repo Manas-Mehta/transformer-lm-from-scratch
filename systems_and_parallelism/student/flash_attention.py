@@ -315,13 +315,9 @@ try:
             O = torch.empty_like(Q)
             L = torch.empty(batch, N_q, device=Q.device, dtype=torch.float32)
 
-            # Tile sizes — reduce for large D + fp32 to stay within shared memory
-            if d >= 128 and Q.dtype == torch.float32:
-                base_tile = 32
-            else:
-                base_tile = 64
-            Q_TILE_SIZE = min(base_tile, N_q)
-            K_TILE_SIZE = min(base_tile, N_k)
+            # Tile sizes — tune these as needed
+            Q_TILE_SIZE = min(64, N_q)
+            K_TILE_SIZE = min(64, N_k)
             scale = 1.0 / math.sqrt(d)
 
             grid = (triton.cdiv(N_q, Q_TILE_SIZE), batch)

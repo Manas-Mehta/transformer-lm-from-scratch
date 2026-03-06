@@ -2252,7 +2252,7 @@ All d_head values OOM at seq_len=65536 for both FA2 and vanilla.
 | 64 | 8192 | 0.943ms | 3.496ms | 4.439ms | 3.473ms | 7.871ms | 11.344ms | 3.68x | 2.56x |
 | 64 | 32768 | 9.306ms | 52.282ms | 61.587ms | 53.808ms | 120.031ms | 173.838ms | 5.78x | 2.82x |
 
-**Note**: fp32 d_head=128 results are missing from the output — the script appears to have completed without running this sweep (possibly a silent OOM during tensor creation or a script flow issue). Only bf16 d_head=128 and fp32 d_head≤64 results were produced.
+**fp32 d_head=128**: All sequence lengths hit a Triton shared memory error: `OutOfResources: shared memory, Required: 181248, Hardware limit: 166912`. With 64x64 tiles and D=128 in fp32, each tile block needs ~181KB of shared memory, exceeding the A100's 166KB/block limit. This is a real hardware constraint — bf16 d=128 works because bf16 elements are 2 bytes (halving shared memory usage), while fp32 at 4 bytes pushes the tiles over the limit. A production implementation would use smaller tiles (e.g., 32x32) for this config, but our kernel uses fixed 64x64 tiles.
 
 All d_head values OOM at seq_len=65536 for fp32.
 
