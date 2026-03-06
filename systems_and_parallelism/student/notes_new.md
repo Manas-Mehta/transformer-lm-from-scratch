@@ -1995,10 +1995,72 @@ This test runs on GPU and checks both `is_causal=False` and `is_causal=True`.
 
 ---
 
-## Summary of all files for Section 1.2
+### (c) Causal masking
+
+Add `is_causal` flag to your `autograd.Function`. When `True`, mask out positions where query index < key index by adding `-1e6` to those attention scores. Save the flag for backward with `ctx.is_causal = is_causal`.
+
+In the Triton kernel, add `is_causal: tl.constexpr` parameter and use index comparison:
+```python
+if is_causal:
+    q_offsets = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+    k_offsets = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+    causal_mask = q_offsets[:, None] >= k_offsets[None, :]
+    S_tile = tl.where(causal_mask, S_tile, float('-inf'))
+```
+
+**Deliverable**: Both PyTorch and Triton should pass `test_flash_forward_pass_triton` with `is_causal=True` and `is_causal=False`.
+
+---
+
+### 1.3.3 Problem (flash_backward): 10 points
+
+Implement the backward pass using PyTorch (not Triton) and `torch.compile`.
+
+The backward uses **recomputation** -- instead of saving the huge P matrix, it recomputes P from Q, K, and the saved logsumexp L. The formulas (Equations 13-19):
+
+```
+S = QK^T / sqrt(d)
+P = exp(S - L)          <- recomputed from L instead of saved!
+D = rowsum(O * dO)
+dV = P^T @ dO
+dP = dO @ V^T
+dS = P * (dP - D)
+dQ = dS @ K / sqrt(d)
+dK = dS^T @ Q / sqrt(d)
+```
+
+This is implemented in `student/flash_attention.py` as `_flash_backward_impl()`, wrapped with `torch.compile` for speed.
+
+**Test**: `uv run pytest -k test_flash_backward`
+
+**Deliverable**: Backward pass implementation that passes `test_flash_backward_pytorch` and `test_flash_backward_triton`.
+
+---
+
+### 1.3.4 Problem (flash_benchmarking): 15 points
+
+**(a)** Write a benchmarking script using `triton.testing.do_bench` that compares:
+- Triton FlashAttention-2 forward + backward
+- Regular PyTorch attention forward + backward
+
+Sweep over:
+- Sequence lengths: powers of 2 from 128 to 65536
+- Embedding dimensions: powers of 2 from 16 to 128
+- Precisions: `torch.bfloat16` and `torch.float32`
+- Batch size: 1, causal masking: True
+
+**Deliverable**: A table comparing Triton FA2 vs PyTorch attention (forward, backward, end-to-end latencies).
+
+**RESULTS PENDING -- implement and run on HPC**
+
+---
+
+## Summary of all files for Section 1.2/1.3
 
 | File | What it contains |
 |------|-----------------|
 | `student/benchmark_attention.py` | Benchmarks naive attention (1.2.1) and torch.compile (1.2.2) |
-| `student/flash_attention.py` | FlashAttention-2 implementations -- PyTorch (1.3.2a) and Triton (1.3.2b) |
+| `student/flash_attention.py` | FlashAttention-2 implementations -- PyTorch (1.3.2a), Triton (1.3.2b), backward (1.3.3) |
+| `student/run_1_2.sbatch` | SLURM script for attention + torch.compile benchmarks |
+| `student/run_1_3_tests.sbatch` | SLURM script to run FlashAttention tests on GPU |
 | `tests/adapters.py` | Hook up your implementations to the test suite |
