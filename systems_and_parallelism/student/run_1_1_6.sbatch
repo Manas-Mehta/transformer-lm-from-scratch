@@ -8,10 +8,9 @@
 #SBATCH --error=logs/%j_1_1_6.err
 #SBATCH --requeue
 
-# 1.1.6: Memory Profiling — 2.7B model
-# batch_size=1 required: 2.7B params (10GB) + AdamW state (20GB) + grads (10GB) = 40GB
-# leaves almost no room for activations at batch>1
-# Also: set_to_none=True in profile_memory to free grads before each step
+# 1.1.6: Memory Profiling
+# 2.7B forward-only works (batch=1). 2.7B "both" OOMs (params+optim+grads=39GB).
+# Use xl for "both" mode — same training step pattern, fits in 40GB.
 
 singularity exec --bind /scratch --nv \
   --overlay /scratch/mm14444/overlay-25GB-500K.ext3:ro \
@@ -22,49 +21,28 @@ singularity exec --bind /scratch --nv \
     cd /scratch/mm14444/transformer-lm-from-scratch/systems_and_parallelism
 
     echo "============================================"
-    echo "  1.1.6 — Memory Profiling (2.7B, batch=1)"
+    echo "  1.1.6 — Memory Profiling"
     echo "  Date: $(date)"
     echo "  GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader)"
     echo "============================================"
 
-    # (a)+(b): FP32 forward for ctx=128, 256, 512
+    # (a) xl full training step — for the "both" memory timeline image
     for CTX in 128 256 512; do
         echo ""
-        echo "====== 2.7B forward, ctx=$CTX, FP32 ======"
+        echo "====== xl both, ctx=$CTX, FP32 ======"
         uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX --batch_size 1 \
-            --mode forward --profile_memory \
-            --warmup_steps 3 \
-        || echo "FAILED (likely OOM) — skipping"
-    done
-
-    # (a)+(b): FP32 full training step for ctx=128, 256, 512
-    for CTX in 128 256 512; do
-        echo ""
-        echo "====== 2.7B both, ctx=$CTX, FP32 ======"
-        uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX --batch_size 1 \
+            --model_size xl --context_length $CTX --batch_size 4 \
             --mode both --profile_memory \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"
     done
 
-    # (c): BF16 mixed precision
+    # (c): xl both with BF16
     for CTX in 128 256 512; do
         echo ""
-        echo "====== 2.7B forward, ctx=$CTX, BF16 ======"
+        echo "====== xl both, ctx=$CTX, BF16 ======"
         uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX --batch_size 1 \
-            --mode forward --profile_memory --mixed_precision \
-            --warmup_steps 3 \
-        || echo "FAILED (likely OOM) — skipping"
-    done
-
-    for CTX in 128 256 512; do
-        echo ""
-        echo "====== 2.7B both, ctx=$CTX, BF16 ======"
-        uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX --batch_size 1 \
+            --model_size xl --context_length $CTX --batch_size 4 \
             --mode both --profile_memory --mixed_precision \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"
