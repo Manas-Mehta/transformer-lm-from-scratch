@@ -8,7 +8,9 @@
 #SBATCH --error=logs/%j_1_1_4e_rerun.err
 #SBATCH --requeue
 
-# Re-run 1.1.4(e) with fixed NVTX attention (monkey-patch now applied AFTER warmup)
+# Re-run 1.1.4(e) with torch.cuda.synchronize() inside each NVTX range
+# so CPU-side NVTX times reflect actual GPU execution time for
+# QK matmul, softmax, and V matmul within attention.
 
 singularity exec --bind /scratch --nv \
   --overlay /scratch/mm14444/overlay-25GB-500K.ext3:ro \
@@ -24,7 +26,7 @@ singularity exec --bind /scratch --nv \
     mkdir -p profiles logs
 
     echo "============================================"
-    echo "  1.1.4(e) RERUN — NVTX attention after warmup"
+    echo "  1.1.4(e) RERUN — NVTX attention with sync"
     echo "  Date: $(date)"
     echo "  GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader)"
     echo "============================================"

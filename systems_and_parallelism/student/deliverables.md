@@ -52,20 +52,28 @@ GPU: NVIDIA A100-SXM4-40GB
 
 ## 1.1.4(d) Full Training Step
 
-> In a full training step, the matmul fraction drops from ~78% (forward-only) to ~64% of GPU kernel time (small ctx=128). The backward pass adds elementwise gradient kernels and transposed matmul variants, while the AdamW optimizer adds `multi_tensor_apply_kernel` entries (~17% of GPU time) for fused momentum/variance/weight updates, though the optimizer wall-clock time is very cheap (~3 ms, <3% of step time).
+> | Config | Forward (ms) | Backward (ms) | Optimizer (ms) | Total Step (ms) | sgemm % | optimizer % |
+> |---|---|---|---|---|---|---|
+> | small ctx=128 | 46.8 | 58.5 | 3.1 | 115.5 | ~54% | ~16% |
+> | small ctx=256 | 45.1 | 59.3 | 3.1 | 114.7 | ~62% | ~15% |
+> | medium ctx=128 | 91.3 | 117.8 | 6.3 | 239.5 | ~56% | ~16% |
+> | medium ctx=256 | 95.2 | 119.7 | 6.4 | 265.5 | ~66% | ~13% |
+>
+> In a full training step, the matmul fraction drops from ~78% (forward-only) to ~54-66% of GPU kernel time because the backward pass adds elementwise gradient kernels and the AdamW optimizer adds `multi_tensor_apply_kernel` entries (~13-16% of GPU time). The cross-entropy loss kernels (`nll_loss_forward/backward`) are negligible at <0.1% of total GPU time.
 
 ## 1.1.4(e) Softmax vs Matmul in Attention
 
-> **PENDING RE-RUN** — NVTX attention monkey-patch was previously applied before warmup, inflating softmax timings. Code now fixed (monkey-patch applied after warmup). Re-run `sbatch student/run_1_1_4e_rerun.sbatch` and fill in table + answer below.
+> | Model | ctx | Softmax GPU (ms) | Total sgemm GPU (ms) | Softmax % of GPU time |
+> |---|---|---|---|---|
+> | small | 128 | 0.11 | 70.0 | 0.1% |
+> | small | 256 | 0.24 | 125.8 | 0.2% |
+> | small | 512 | 0.93 | 218.9 | 0.3% |
+> | small | 1024 | 3.61 | 462.4 | 0.6% |
+> | medium | 128 | 0.20 | 186.0 | 0.1% |
+> | medium | 256 | 0.47 | 349.9 | 0.1% |
+> | medium | 512 | 2.44 | 673.3 | 0.3% |
 >
-> | Model | ctx | QK matmul (ms) | softmax (ms) | V matmul (ms) | softmax % of attn |
-> |---|---|---|---|---|---|
-> | small | 128 | PENDING | PENDING | PENDING | PENDING |
-> | small | 256 | PENDING | PENDING | PENDING | PENDING |
-> | medium | 128 | PENDING | PENDING | PENDING | PENDING |
-> | medium | 256 | PENDING | PENDING | PENDING | PENDING |
->
-> From CUDA kernel profiling, softmax-related kernels take ~1-2% of GPU time while matmul kernels take 79-85%, consistent with the ~64x FLOPs difference (matmul does O(S^2 * d_k) vs softmax's O(S^2) with d_k=64). Matmul also better utilizes the GPU's tensor cores (compute-bound) while softmax is memory-bandwidth-bound, further widening the runtime gap.
+> Softmax takes <1% of GPU time across all configs while matmuls take 70-80%+, because matmuls do O(S^2 * d_k) FLOPs vs softmax's O(S^2) with d_k=64, a ~64x difference. Softmax scales quadratically with context length (0.11→0.93→3.61 ms from ctx=128→512→1024) but remains negligible because it is memory-bandwidth-bound while matmuls fully utilize the GPU's tensor cores.
 
 ---
 
@@ -77,7 +85,18 @@ GPU: NVIDIA A100-SXM4-40GB
 
 ### 1.1.5(a) ToyModel dtype inspection
 
-> Under FP16 autocast, model parameters remain stored in FP32 -- autocast does not modify the weights in memory, it creates temporary FP16 copies for computation. Linear layer outputs (matmuls) are downcast to FP16 for speed on tensor cores. LayerNorm output is kept in FP32 because its mean/variance accumulation is precision-sensitive (as demonstrated in mixed_precision_accumulation). The loss (cross_entropy) is computed in FP32, and all gradients are stored in FP32. This confirms autocast is truly "mixed" -- it selectively downcasts only the compute-heavy, precision-tolerant operations (matmuls) while preserving FP32 for accumulation-sensitive operations.
+> Under FP16 autocast:
+>
+> | Component | dtype |
+> |---|---|
+> | Model parameters (within autocast) | FP32 (autocast does not modify stored weights, creates temporary FP16 copies) |
+> | Output of `fc1` (Linear matmul) | FP16 (matmuls downcast for tensor core speed) |
+> | Output of `ln` (LayerNorm) | FP32 (accumulation-sensitive, kept in full precision) |
+> | Predicted logits (output of `fc2`) | FP16 (another Linear matmul) |
+> | Loss (cross_entropy) | FP32 (reduction/accumulation operation) |
+> | Gradients | FP32 (all gradients stored in full precision) |
+>
+> Autocast is truly "mixed" — it selectively downcasts only compute-heavy, precision-tolerant operations (matmuls) to FP16, while keeping accumulation-sensitive operations (LayerNorm, loss, gradients) in FP32.
 
 ### 1.1.5(b) LayerNorm and precision
 
