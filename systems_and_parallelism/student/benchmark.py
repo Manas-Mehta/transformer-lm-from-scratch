@@ -27,6 +27,7 @@ benchmark.py
 import argparse          # For command-line argument parsing
 import timeit            # For high-resolution timing
 import torch
+import torch.nn.functional as F
 import numpy as np
 from contextlib import nullcontext   # No-op context manager (for mixed precision toggle)
 from a1_basics.model import BasicsTransformerLM
@@ -184,7 +185,7 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=Non
             with amp_context:
                 output = model(input_ids)
             if mode in ("backward", "both"):
-                loss = output.sum()
+                loss = F.cross_entropy(output[:, :-1].reshape(-1, output.size(-1)), input_ids[:, 1:].reshape(-1))
                 loss.backward()
                 if optimizer is not None:
                     optimizer.step()
@@ -207,7 +208,7 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=Non
 
                 if mode in ("backward", "both"):
                     with nvtx.range("backward"):
-                        loss = output.sum()
+                        loss = F.cross_entropy(output[:, :-1].reshape(-1, output.size(-1)), input_ids[:, 1:].reshape(-1))
                         loss.backward()
 
                     if optimizer is not None:
@@ -234,7 +235,7 @@ def profile_memory(model, input_ids, mode, warmup_steps, amp_context, args):
         with amp_context:
             output = model(input_ids)
         if mode in ("backward", "both"):
-            loss = output.sum()
+            loss = F.cross_entropy(output[:, :-1].reshape(-1, output.size(-1)), input_ids[:, 1:].reshape(-1))
             loss.backward()
             optimizer.step()
         torch.cuda.synchronize()
@@ -248,7 +249,7 @@ def profile_memory(model, input_ids, mode, warmup_steps, amp_context, args):
     with amp_context:
         output = model(input_ids)
     if mode in ("backward", "both"):
-        loss = output.sum()
+        loss = F.cross_entropy(output[:, :-1].reshape(-1, output.size(-1)), input_ids[:, 1:].reshape(-1))
         loss.backward()
         optimizer.step()
     torch.cuda.synchronize()

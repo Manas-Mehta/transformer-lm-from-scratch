@@ -22,17 +22,25 @@ GPU: NVIDIA A100-SXM4-40GB
 
 ## 1.1.3(b) Benchmarking Results
 
-> On an A100-SXM4-40GB, forward-only latency ranges from 38.32 ms (small) to 219.24 ms (2.7B), scaling roughly 5.7x across configurations. Forward+backward latency ranges from 78.33 ms to 672.30 ms, with the backward pass costing approximately 2-3x the forward pass due to gradient computation through every layer. Standard deviations are consistently below 1% of the mean, indicating stable measurements. The results were obtained with batch_size=4, context_length=128, 5 warmup steps, and 10 measurement steps.
+> | Model | Fwd Mean (ms) | Fwd Std (ms) | Fwd+Bwd Mean (ms) | Fwd+Bwd Std (ms) |
+> |---|---|---|---|---|
+> | small | 38.32 | 0.36 | 78.33 | 0.46 |
+> | medium | 76.59 | 0.71 | 154.60 | 0.31 |
+> | large | 114.59 | 0.56 | 273.11 | 3.71 |
+> | xl | 155.08 | 1.06 | 457.88 | 1.36 |
+> | 2.7B | 219.24 | 0.10 | 672.30 | 0.23 |
+>
+> Forward-only latency scales from 38 ms (small, 12 layers) to 219 ms (2.7B), with the backward pass consistently costing ~2-3x the forward pass (e.g., 78 ms vs 38 ms for small). Standard deviations are below 1% of the mean across all configurations, indicating highly stable measurements with 5 warmup steps.
 
 ## 1.1.3(c) Warmup Effect
 
-> With zero warmup steps, the first measurement includes ~1550 ms of CUDA initialization overhead, inflating the mean to 226 ms with a standard deviation of 441 ms. A single warmup step eliminates this, bringing the mean to 77.6 ms with std of 2.0 ms. Beyond 1-2 warmup steps, there is negligible improvement (warmup=5 gives 76.3 ms mean). We use 5 warmup steps throughout the assignment to be safe, but even 1-2 would suffice for stable measurements.
+> With zero warmup steps, the first measurement includes ~1550 ms of CUDA context initialization and cuDNN autotuning overhead, inflating the mean to 226 ms with a massive standard deviation of 441 ms (vs. 76.3 ms mean / 0.46 ms std with warmup=5). A single warmup step eliminates most of this (mean drops to 77.6 ms, std to 2.0 ms), but with only 1-2 warmup steps the result can still differ slightly because cuDNN autotuning and memory allocator warm-up may not fully stabilize until a few iterations have run. We use 5 warmup steps throughout the assignment to ensure fully stable measurements, though even 2 would suffice in practice.
 
 ---
 
 ## 1.1.4(a) nsys vs timeit
 
-> The nsys `:measurement` NVTX range matches our timeit results almost exactly (within 0.1 ms), e.g., small ctx=128 gives 48.32 ms from timeit vs 48.34 ms from nsys. This is expected because both measure the same wall-clock interval using `torch.cuda.synchronize()`.
+> The nsys `:measurement` NVTX range matches our timeit results almost exactly (within 0.1 ms), e.g., small ctx=128 gives 48.32 ms from timeit vs 48.34 ms from nsys — both are CPU-side wall-clock measurements bracketing the same synchronized code. Note that both values are ~25% higher than the 38.32 ms from 1.1.3(b) because `nsys profile` adds instrumentation overhead to every CUDA API call.
 
 ## 1.1.4(b) Dominant GPU Kernel
 

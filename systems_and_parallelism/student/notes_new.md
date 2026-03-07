@@ -1,5 +1,19 @@
 # Section 1.1 -- Profiling and Benchmarking
 
+## ⚠️ KNOWN ISSUES IN benchmark.py (to fix if re-running)
+
+1. **1.1.4(d): `output.sum()` used instead of real cross-entropy loss.** The question asks to profile "the forward pass, computing the loss and running a backward pass, and finally an optimizer step." Our code uses `output.sum()` as a dummy loss, skipping the `F.cross_entropy` kernel entirely. Impact on numbers is minimal (cross-entropy is tiny), but doesn't match what the question describes.
+
+2. **1.1.4(e): NVTX attention annotations fire during warmup.** The `--nvtx_attention` monkey-patch is applied before warmup, so NVTX sub-operation timings (QK matmul, softmax, V matmul) include warmup overhead. The small ctx=128 softmax value (48.58ms, 56.9%) is inflated by one-time CUDA init. The deliverable answer sidesteps this by citing CUDA kernel summary percentages instead, which are unaffected. To fix: apply the monkey-patch after warmup, or filter nsys stats to the `:measurement` NVTX range only.
+
+3. **1.1.6(a): Missing second memory timeline image.** The question asks for TWO images: forward-only AND full training step for the 2.7B model. Forward-only pickle exists (`memory_2.7B_128_forward_fp32.pickle`), but full training OOM'd so there's no second image. **To fix — pick one:**
+   - **TA confirmed (Harry, 3/3/26): use a smaller model for full training.**
+   - XL also OOM'd. Try **large** or **medium** instead.
+   - Command: `python student/benchmark.py --model_size large --context_length 128 --mode both --profile_memory --warmup_steps 5`
+   - If large OOM's too, use medium.
+
+---
+
 This section is about understanding how fast (and how memory-hungry) transformer models are on real GPU hardware. We will build a benchmarking script, profile it with NVIDIA tools, experiment with mixed-precision training, and profile memory usage. Everything runs on an A100 40GB GPU on the NYU HPC cluster.
 
 ---
@@ -590,7 +604,7 @@ uv run nsys profile -o profiles/fwd_small_128 --force-overwrite true \
 nsys stats profiles/fwd_small_128.nsys-rep
 ```
 
-Look at the "CUDA GPU Kernel Summary" — the sum of all kernel times should roughly match your `timeit` measurement from 1.1.3(b) (e.g., small forward ≈ 38.32 ms).
+Note: The timeit values here are higher than 1.1.3(b) (e.g., small forward = 48 ms vs 38 ms) because running under `nsys profile --trace cuda,nvtx` adds ~25% profiling overhead — the profiler intercepts every CUDA API call to record it. The nsys NVTX measurement and the timeit within the same profiled run should match each other (and they do).
 
 **RESULTS** (from `sbatch student/run_1_1_4.sbatch`, GPU: NVIDIA A100-SXM4-40GB):
 
@@ -619,7 +633,7 @@ Note: For larger configs, :measurement > :forward because measurement includes `
 
 ### Deliverable answer for 1.1.4(a) [1-2 sentences]
 
-> The nsys `:measurement` NVTX range matches our timeit results almost exactly (within 0.1 ms), e.g., small ctx=128 gives 48.32 ms from timeit vs 48.34 ms from nsys. This is expected because both measure the same wall-clock interval using `torch.cuda.synchronize()`.
+> The nsys `:measurement` NVTX range matches our timeit results almost exactly (within 0.1 ms), e.g., small ctx=128 gives 48.32 ms from timeit vs 48.34 ms from nsys `:measurement`. Both are CPU-side wall-clock measurements that bracket the same synchronized code, so they should agree. The real value of nsys over timeit is the GPU kernel-level breakdown (cuda_gpu_kern_sum), which reveals *where* within that wall-clock time the GPU actually spends its cycles.
 
 ---
 
@@ -2091,3 +2105,298 @@ All d_head values OOM at seq_len=65536 for fp32.
 | `student/run_1_2.sbatch` | SLURM script for Section 1.2 (pytorch_attention) |
 | `student/run_1_3.sbatch` | SLURM script for all Section 1.3 (compile + flash tests + benchmarks) |
 | `tests/adapters.py` | Hook up implementations to the test suite |
+
+---
+
+# QUIZ PREP
+
+## Part 1: Most Likely Questions (High Priority)
+
+### 1.1.3 — Benchmarking Basics
+
+**Q1.** Why do we call `torch.cuda.synchronize()` before starting and after stopping the timer?
+**A:** CUDA operations are asynchronous — the CPU returns immediately after launching a GPU kernel. Without synchronize, you'd measure CPU dispatch time, not actual GPU execution time.
+
+**Q2.** What happens if you skip warmup steps when benchmarking? Why?
+**A:** The first run includes ~1500ms of one-time CUDA initialization overhead (context creation, kernel compilation, memory allocation). This inflates the mean and creates huge standard deviation. Even 1-2 warmup steps eliminate this.
+
+**Q3.** What timer do we use and why not `time.time()`?
+**A:** `timeit.default_timer()` — it uses the highest-resolution clock available on the system. `time.time()` has lower resolution and is less reliable for sub-millisecond measurements.
+
+**Q4.** The backward pass is approximately how many times slower than the forward pass?
+**A:** ~2-3x. The backward pass must compute gradients through every layer, roughly doubling the matmul work (plus gradient accumulation overhead).
+
+### 1.1.4 — nsys Profiling
+
+**Q5.** What is the dominant CUDA kernel type in a transformer forward pass?
+**A:** `ampere_sgemm_*` (matrix multiplication / GEMM kernels). They account for 70-94% of GPU time depending on model size.
+
+**Q6.** What percentage of GPU time do matmul kernels take in the forward pass? In a full training step?
+**A:** Forward: ~78-85%. Full training step: ~64% (drops because backward adds gradient kernels and optimizer adds `multi_tensor_apply_kernel`).
+
+**Q7.** Name 3 non-matmul kernels that appear in the forward pass profile.
+**A:** (1) Elementwise kernels — activation functions (SiLU), residual additions. (2) Reduction kernels — LayerNorm mean/variance. (3) Softmax kernels — exp and reduce for softmax max/sum.
+
+**Q8.** Does the nsys wall-clock time match the Python timeit measurement?
+**A:** Yes, within ~0.1ms. Both are CPU-side wall-clock measurements bracketing the same synchronized code.
+
+**Q9.** What does the AdamW optimizer contribute to the GPU kernel profile?
+**A:** `multi_tensor_apply_kernel` entries — fused momentum/variance/weight update kernels. ~17% of GPU kernel time but only ~3ms wall-clock (~3% of step time).
+
+### 1.1.5 — Mixed Precision
+
+**Q10.** What does `torch.autocast` do? Does it change the stored model weights?
+**A:** Autocast creates temporary lower-precision (FP16/BF16) copies of weights for compute-heavy operations (matmuls). It does NOT modify the stored weights — they remain FP32.
+
+**Q11.** Under FP16 autocast, what is the dtype of: (a) model parameters, (b) Linear layer output, (c) LayerNorm output, (d) loss, (e) gradients?
+**A:** (a) FP32 (b) FP16 (c) FP32 (d) FP32 (e) FP32
+
+**Q12.** Why does LayerNorm stay in FP32 under autocast?
+**A:** LayerNorm computes mean and variance by summing many values. This is an accumulation operation that loses precision in FP16/BF16 (the "stalling" problem where small increments vanish when added to a large running sum).
+
+**Q13.** Does BF16 fix the LayerNorm precision problem compared to FP16?
+**A:** No. BF16 has even fewer mantissa bits (7 vs 10), making accumulation errors worse. BF16's advantage is better dynamic range (same exponent range as FP32), but accumulation still needs FP32.
+
+**Q14.** If you sum 0.01 a thousand times in FP16, what do you get? Why?
+**A:** ~9.95 (not 10.0). As the running sum grows past ~8, FP16 can't represent the difference between the sum and sum+0.01 — the small increment gets rounded away ("accumulator stalling").
+
+**Q15.** At what model size does BF16 mixed precision start to provide speedup? Why?
+**A:** Around the "large" model (breakeven at 1.02x). Small/medium models are overhead-dominated, not compute-bound — autocast overhead exceeds matmul speedup. Only when matmuls dominate runtime (large/XL/2.7B) does faster tensor core math help.
+
+**Q16.** Does `torch.autocast` reduce memory usage?
+**A:** No — it actually INCREASES memory because it keeps FP32 parameters AND creates temporary BF16 copies. For memory savings, you need `model.bfloat16()` to convert weights themselves.
+
+**Q17.** What is loss scaling and what problem does it solve?
+**A:** Loss scaling multiplies the loss by a large factor before `.backward()`, scaling up all gradients proportionally so they don't underflow to zero in FP16. After backward, gradients are scaled back down before the optimizer step. It solves gradient underflow, NOT accumulation precision.
+
+### 1.1.6 — Memory Profiling
+
+**Q18.** What is the size of a single residual stream activation tensor for the 2.7B model at batch=4, ctx=128?
+**A:** Shape: (4, 128, 2560). Size: 4 x 128 x 2560 x 4 bytes = 5,242,880 bytes = 5.0 MB.
+
+**Q19.** At ctx=1024, same model?
+**A:** 4 x 1024 x 2560 x 4 = 41,943,040 bytes = 40.0 MB.
+
+**Q20.** Why can't the 2.7B model be trained on a single A100 (40GB)?
+**A:** Parameters: ~10GB. Gradients: ~10GB. AdamW states (momentum + variance): ~20GB. Total: ~40GB — fills the GPU before any activations are allocated.
+
+**Q21.** What does the forward-only memory timeline look like?
+**A:** A steady staircase climb — each transformer layer adds an activation tensor, memory grows linearly across all 32 layers, then flattens. No gradients or optimizer states.
+
+**Q22.** What does a full training step memory timeline look like?
+**A:** Three phases: (1) Forward: staircase climb as activations accumulate. (2) Backward: peak memory — gradients allocated while activations freed layer-by-layer. (3) Optimizer: brief spike for AdamW states, then drop as gradients are freed.
+
+**Q23.** How many bytes does AdamW need per parameter?
+**A:** 8 bytes — two FP32 state tensors per parameter: momentum (4 bytes) + variance (4 bytes).
+
+### 1.2 — PyTorch Attention Benchmarking
+
+**Q24.** What is the shape of the attention score matrix for batch=8, seq_len=16384?
+**A:** (8, 16384, 16384). Size in FP32: 8 x 16384 x 16384 x 4 = 32 GB.
+
+**Q25.** Why does attention OOM at seq_len=16384 regardless of d_model?
+**A:** The attention score matrix is (batch, seq_len, seq_len) — it depends on seq_len^2, not d_model. At seq=16384 it's 32GB, exceeding the A100's 40GB.
+
+**Q26.** How does memory scale with sequence length in attention? With d_model?
+**A:** Memory scales O(n^2) with sequence length (quadratic). It scales O(n) with d_model (linear, just for Q/K/V storage — negligible compared to the attention matrix).
+
+**Q27.** What would you do to eliminate the O(n^2) memory cost of attention?
+**A:** FlashAttention — compute attention in tiles using online softmax, never materializing the full attention matrix. Reduces memory from O(n^2) to O(n).
+
+### 1.3 — torch.compile
+
+**Q28.** What does `torch.compile` do?
+**A:** JIT compiler that traces the computation graph, fuses operations into optimized Triton kernels, and eliminates unnecessary intermediate tensors. First call is slow (compilation), subsequent calls are fast.
+
+**Q29.** Does `torch.compile` eliminate the O(n^2) memory scaling of attention?
+**A:** No. It reduces memory somewhat by fusing operations, but the fundamental O(n^2) attention matrix still exists. Only FlashAttention eliminates this.
+
+### 1.3.1 — Weighted Sum (Triton Basics)
+
+**Q30.** What does `tl.program_id(0)` return?
+**A:** The index of the current program instance (thread block). Each instance processes a different tile of the data.
+
+**Q31.** What are the 6 arguments to `tl.make_block_ptr`?
+**A:** (1) base pointer, (2) shape — full tensor shape, (3) strides — element spacing per dimension, (4) offsets — starting position of this tile, (5) block_shape — tile size, (6) order — memory layout.
+
+**Q32.** What does `.advance((0, D_TILE_SIZE))` do?
+**A:** Slides the block pointer right by D_TILE_SIZE columns (moves to the next column tile). The (0, D_TILE_SIZE) means 0 rows down, D_TILE_SIZE columns right.
+
+**Q33.** Why must tile sizes be `tl.constexpr`?
+**A:** Triton compiles kernels at launch time. Tile sizes must be compile-time constants so the compiler can generate fixed-size memory access patterns and register allocations.
+
+**Q34.** What is `boundary_check` with `padding_option="zero"`?
+**A:** Handles the case where a tile extends past the edge of the tensor (when dimensions aren't evenly divisible by tile size). Out-of-bounds elements are read as zero.
+
+**Q35.** For X of shape (ROWS, D), what is x_stride_row? x_stride_dim?
+**A:** x_stride_row = D (skip D elements to go down one row). x_stride_dim = 1 (skip 1 element to go right one column). For contiguous row-major layout.
+
+**Q36.** In the weighted sum backward, why can't all thread blocks write directly to `grad_w`?
+**A:** Race condition — multiple thread blocks would simultaneously add to the same memory locations. Instead, each thread block writes to its own row in `partial_grad_weight` (shape: n_row_tiles x D), then sum across row tiles after the kernel finishes.
+
+**Q37.** What is the launch grid for the weighted sum forward?
+**A:** `(cdiv(n_rows, ROWS_TILE_SIZE),)` — one program instance per row tile. 1D grid.
+
+**Q38.** In the weighted sum, what is grad_x[i,j]?
+**A:** `grad_out[i] * w[j]` — the outer product of grad_out and w.
+
+**Q39.** In the weighted sum, what is grad_w[j]?
+**A:** `sum over i of (x[i,j] * grad_out[i])` — requires summing across all rows.
+
+### 1.3.2 — FlashAttention-2
+
+**Q40.** What three techniques does FlashAttention use to avoid O(n^2) memory?
+**A:** (1) Tiling — process small B_q x B_k tiles. (2) Recomputation — recompute P from saved logsumexp L instead of storing the full attention matrix. (3) Operator fusion — all attention ops in one kernel, no intermediate writes to HBM.
+
+**Q41.** What is the online softmax trick? Why is it needed?
+**A:** Normal softmax needs the full row to compute max and denominator. Online softmax maintains running statistics (m = running max, l = running sum). When a new tile has a bigger max, all previous results are rescaled by exp(m_old - m_new). This lets you compute exact softmax without ever seeing the full row at once.
+
+**Q42.** What does FlashAttention save for the backward pass instead of the full P matrix?
+**A:** L = m + log(l) — the logsumexp vector, shape (batch, seq_len). This is enough to recompute P from Q, K during backward.
+
+**Q43.** What is the shape of L (logsumexp)?
+**A:** (batch, N_q) — one scalar per query position. This is O(n), not O(n^2).
+
+**Q44.** In the backward pass, how is P recomputed?
+**A:** P_ij = exp(S_ij - L_i) where S = QK^T / sqrt(d). L was saved from forward.
+
+**Q45.** What is the launch grid for the FlashAttention Triton kernel?
+**A:** (T_q, batch_size) — one program instance per (query tile, batch element). 2D grid.
+
+**Q46.** Why does the Triton kernel accumulate O, l, m in FP32 even when inputs are BF16?
+**A:** Accumulation is precision-sensitive (same reason LayerNorm stays FP32). Small softmax weights would lose precision if accumulated in BF16.
+
+**Q47.** What is D in the backward pass equations? How is it computed?
+**A:** D = rowsum(O * dO) — element-wise multiply of output and grad_output, summed per row. It's precomputed before the backward loop.
+
+**Q48.** How does causal masking work in the Triton kernel?
+**A:** Compare query indices vs key indices: `causal_mask = q_offsets[:, None] >= k_offsets[None, :]`. Where the mask is False, set S_ij = -1e6 (effectively -inf for softmax).
+
+**Q49.** What is the memory complexity of FlashAttention forward? Backward (our implementation)?
+**A:** Forward: O(n) — only tile-sized buffers in SRAM plus O(n) for L. Our backward: still O(n^2) because we used torch.compile, not a tiled Triton backward. A full Triton backward would also be O(n).
+
+**Q50.** When does FA2 provide the LARGEST speedup over vanilla attention?
+**A:** At small d_head and long sequence lengths. Small d_head means less compute per tile (more memory-bound), and long sequences mean vanilla's O(n^2) memory traffic dominates.
+
+**Q51.** Why does FA2 speedup DECREASE with larger d_head?
+**A:** Larger d_head makes the matmuls compute-bound rather than memory-bound. FA2's advantage is primarily in reducing memory access — when compute dominates, vanilla attention is already efficient.
+
+### Calculations you should be able to do
+
+**Q52.** Attention score matrix size: batch=8, seq=8192, FP32.
+**A:** 8 x 8192 x 8192 x 4 bytes = 2,147,483,648 bytes = 2 GB.
+
+**Q53.** Residual stream tensor: batch=4, ctx=512, d_model=2560, FP32.
+**A:** 4 x 512 x 2560 x 4 = 20,971,520 bytes = 20.0 MB.
+
+**Q54.** 2.7B model parameter memory in FP32.
+**A:** ~2.7 billion x 4 bytes = ~10.8 GB. (Roughly 10 GB.)
+
+**Q55.** AdamW total memory for 2.7B model.
+**A:** Parameters (10GB) + Gradients (10GB) + Momentum (10GB) + Variance (10GB) = ~40 GB.
+
+**Q56.** A100 peak throughput: FP32 vs BF16?
+**A:** FP32: 19.5 TFLOPS. BF16: 312 TFLOPS. Ratio: 16x.
+
+---
+
+## Part 2: Deeper / Less Likely Questions
+
+### Precision & Numerics
+
+**Q57.** FP16 has how many mantissa bits? BF16? FP32?
+**A:** FP16: 10. BF16: 7. FP32: 23.
+
+**Q58.** FP16 has how many exponent bits? BF16? FP32?
+**A:** FP16: 5. BF16: 8. FP32: 8. (BF16 has the same exponent range as FP32.)
+
+**Q59.** What's the difference between the accumulation problem and the overflow problem in FP16?
+**A:** Accumulation: small values vanish when added to large sums (mantissa too narrow). Overflow: values exceed FP16's max range (~65504) and become inf/NaN. BF16 fixes overflow (same range as FP32) but makes accumulation worse (fewer mantissa bits).
+
+**Q60.** In the mixed_precision_accumulation exercise, why does FP32 accumulator + FP16 values give 10.002 instead of exactly 10.0?
+**A:** 0.01 can't be represented exactly in FP16 — it's stored as ~0.010002. The FP32 accumulator prevents stalling, but the input values themselves are slightly off.
+
+### Memory & Profiling Details
+
+**Q61.** What is HBM? What is SRAM? Which is faster?
+**A:** HBM = High Bandwidth Memory (GPU global memory, ~40GB on A100, ~2TB/s). SRAM = Static RAM (on-chip cache/shared memory, ~20MB on A100, ~19TB/s). SRAM is ~10x faster but ~2000x smaller.
+
+**Q62.** Why does `torch.autocast` with BF16 INCREASE peak memory for the 2.7B forward pass (23.8GB -> 32.8GB)?
+**A:** Autocast keeps FP32 parameters AND creates temporary BF16 copies for matmul. Both versions coexist in GPU memory. For actual memory savings, use `model.bfloat16()`.
+
+**Q63.** What does `torch.cuda.reset_peak_memory_stats()` do? When would you call it?
+**A:** Resets the peak memory counter to 0. Call it after warmup but before the measurement step, so the peak reflects only the measured operation.
+
+**Q64.** What does `torch.cuda.memory._record_memory_history()` do?
+**A:** Starts recording every memory allocation and deallocation with stack traces. The resulting snapshot can be visualized at pytorch.org/memory_viz.
+
+### Triton Deep Dive
+
+**Q65.** What is the difference between a Triton program instance and a CUDA thread?
+**A:** A Triton program instance corresponds to a CUDA thread block (many threads working together). Triton abstracts away individual threads — you program at the block level.
+
+**Q66.** In `tl.make_block_ptr`, what does `order=(1, 0)` mean?
+**A:** The memory layout order from major to minor dimension. `(1, 0)` means dimension 1 (columns) changes fastest in memory — this is row-major/C-contiguous layout.
+
+**Q67.** Why does the weighted sum backward need `n_row_tiles` to use `tl.num_programs(0)`?
+**A:** To know how many rows the `partial_grad_weight` buffer has — one per program instance. This lets each instance write to its own row at index `row_tile_idx`.
+
+**Q68.** What is `tl.cdiv(a, b)`?
+**A:** Ceiling division: `(a + b - 1) // b`. Needed to compute the number of tiles when the dimension doesn't divide evenly.
+
+**Q69.** In FlashAttention Triton kernel, why do we cast P to V's dtype before `tl.dot`?
+**A:** P is computed in FP32 (for accumulation precision) but V might be BF16. `tl.dot` requires matching dtypes. We cast P down to BF16 for the matmul, keeping the accumulator (`acc`) in FP32.
+
+**Q70.** What is the shared memory limit on A100? Why does FP32 d=128 fail?
+**A:** 166,912 bytes (166KB) per thread block. With 64x64 tiles and D=128 in FP32: each block needs Q_tile(64x128x4) + K_tile(64x128x4) + V_tile(64x128x4) + buffers ≈ 181KB > 166KB. BF16 halves the per-element size, fitting within the limit.
+
+### FlashAttention Theory
+
+**Q71.** In the online softmax rescaling step, what is `exp(m_old - m_new)` always <= ?
+**A:** Always <= 1.0, because m_new >= m_old (we took the max). This means the rescaling always shrinks previous values — we're adjusting them to account for a new, larger maximum.
+
+**Q72.** What happens if ALL scores in a new key tile are smaller than the current running max?
+**A:** m_new = m_old, so exp(m_old - m_new) = exp(0) = 1. No rescaling needed — the old O and l remain unchanged. The new tile's small contributions just get added.
+
+**Q73.** In the backward pass (Eq 17), what is `dS = P * (dP - D)`? Why element-wise multiply by P?
+**A:** This is the derivative of softmax. The Jacobian of softmax applied to upstream gradient dP gives `P * (dP - D)` where D = rowsum(dP * P). The P factor means positions with zero attention weight also have zero gradient.
+
+**Q74.** Why does the backward pass compute P twice in Algorithm 2 (Triton backward)?
+**A:** Once for the dQ pass (outer loop over K tiles, inner loop over Q tiles) and once for the dK/dV pass. Computing P twice avoids needing atomic operations or synchronization between thread blocks that would be needed if dQ and dK/dV were computed in the same pass.
+
+**Q75.** What is the FLOPs complexity of FlashAttention vs vanilla attention?
+**A:** Same — both are O(n^2 * d) for the forward pass. FlashAttention doesn't reduce compute, it reduces memory IO. The recomputation in backward actually adds some compute, but the IO savings more than compensate on modern GPUs.
+
+### Model Architecture Recall (from Table 1)
+
+**Q76.** Fill in: small model: d_model=___, num_layers=___, num_heads=___
+**A:** d_model=768, num_layers=12, num_heads=12
+
+**Q77.** Fill in: 2.7B model: d_model=___, num_layers=___, num_heads=___
+**A:** d_model=2560, num_layers=32, num_heads=32
+
+**Q78.** What is d_k (head dimension) for the small model?
+**A:** d_model / num_heads = 768 / 12 = 64
+
+**Q79.** What is d_k for the 2.7B model?
+**A:** 2560 / 32 = 80
+
+**Q80.** What vocab size and batch size are used throughout the assignment?
+**A:** vocab_size=10000, batch_size=4
+
+### Miscellaneous
+
+**Q81.** What is `ctx.save_for_backward()` in `torch.autograd.Function`?
+**A:** Saves tensors during forward pass that will be needed to compute gradients during backward. Retrieved via `ctx.saved_tensors` in the backward method.
+
+**Q82.** What is monkey-patching? How did we use it?
+**A:** Replacing a function at runtime. We replaced `a1_basics.model.scaled_dot_product_attention` with our NVTX-annotated version to profile attention sub-operations without modifying the original code.
+
+**Q83.** What is `triton.testing.do_bench`?
+**A:** Standard Triton benchmarking function. Handles warmup, synchronization, and returns median time in ms. More reliable than manual timing for GPU kernels.
+
+**Q84.** Why does the backward pass of FlashAttention use `torch.compile` instead of Triton?
+**A:** The backward involves many operations (recompute S, P, compute dV, dP, dS, dQ, dK) that are complex to tile in Triton. `torch.compile` provides automatic fusion with reasonable performance. A full Triton backward is optional/extra credit.
+
+**Q85.** What is the key difference between `ctx.save_for_backward` in vanilla attention vs FlashAttention?
+**A:** Vanilla: saves P of shape (batch, n, n) — O(n^2). FlashAttention: saves L of shape (batch, n) — O(n). Plus Q, K, V, O in both cases, but those are O(n*d).
