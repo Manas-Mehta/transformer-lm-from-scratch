@@ -10,7 +10,7 @@
 
 # 1.1.6: Memory Profiling
 # 2.7B forward-only works (batch=1). 2.7B "both" OOMs (params+optim+grads=39GB).
-# Use xl for "both" mode — same training step pattern, fits in 40GB.
+# Use large for "both" mode — ~730M params, fixed cost ~12GB, fits easily.
 
 singularity exec --bind /scratch --nv \
   --overlay /scratch/mm14444/overlay-25GB-500K.ext3:ro \
@@ -29,9 +29,9 @@ singularity exec --bind /scratch --nv \
     # (a) xl full training step — for the "both" memory timeline image
     for CTX in 128 256 512; do
         echo ""
-        echo "====== xl both, ctx=$CTX, FP32 ======"
+        echo "====== large both, ctx=$CTX, FP32 ======"
         uv run python student/benchmark.py \
-            --model_size xl --context_length $CTX --batch_size 4 \
+            --model_size large --context_length $CTX --batch_size 4 \
             --mode both --profile_memory \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"
@@ -40,9 +40,9 @@ singularity exec --bind /scratch --nv \
     # (c): xl both with BF16
     for CTX in 128 256 512; do
         echo ""
-        echo "====== xl both, ctx=$CTX, BF16 ======"
+        echo "====== large both, ctx=$CTX, BF16 ======"
         uv run python student/benchmark.py \
-            --model_size xl --context_length $CTX --batch_size 4 \
+            --model_size large --context_length $CTX --batch_size 4 \
             --mode both --profile_memory --mixed_precision \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"
