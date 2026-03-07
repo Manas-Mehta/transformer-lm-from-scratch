@@ -118,18 +118,18 @@ def annotated_scaled_dot_product_attention(Q, K, V, mask=None):
 
     with nvtx.range("attention_matmul_QK"):
         attention_scores = torch.einsum("...qd,...kd->...qk", Q, K) / math.sqrt(d_k)
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
     if mask is not None:
         attention_scores = torch.where(mask, attention_scores, float("-inf"))
 
     with nvtx.range("attention_softmax"):
         attention_weights = torch.softmax(attention_scores, dim=-1)
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
     with nvtx.range("attention_matmul_V"):
         output = torch.einsum("...qk,...kd->...qd", attention_weights, V)
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
     return output
 
