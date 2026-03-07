@@ -236,31 +236,38 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=Non
 
 def profile_memory(model, input_ids, mode, warmup_steps, amp_context, args):
     """Run one step with memory profiling. Saves a .pickle snapshot for pytorch.org/memory_viz."""
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # Only create optimizer if we need it (backward/both mode)
+    optimizer = None
+    if mode in ("backward", "both"):
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-    # Warmup with optimizer (so optimizer states are allocated before measurement)
+    # Warmup (match the mode so we don't allocate unnecessary state)
     for _ in range(warmup_steps):
-        optimizer.zero_grad()
+        if optimizer is not None:
+            optimizer.zero_grad()
         with amp_context:
             output = model(input_ids)
         if mode in ("backward", "both"):
             loss = F.cross_entropy(output[:, :-1].reshape(-1, output.size(-1)), input_ids[:, 1:].reshape(-1))
             loss.backward()
-            optimizer.step()
+            if optimizer is not None:
+                optimizer.step()
         torch.cuda.synchronize()
 
     # Reset and start recording
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.memory._record_memory_history(max_entries=1000000)
 
-    # One measured step with optimizer
-    optimizer.zero_grad()
+    # One measured step
+    if optimizer is not None:
+        optimizer.zero_grad()
     with amp_context:
         output = model(input_ids)
     if mode in ("backward", "both"):
         loss = F.cross_entropy(output[:, :-1].reshape(-1, output.size(-1)), input_ids[:, 1:].reshape(-1))
         loss.backward()
-        optimizer.step()
+        if optimizer is not None:
+            optimizer.step()
     torch.cuda.synchronize()
 
     # Save snapshot and report
