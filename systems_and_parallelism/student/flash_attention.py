@@ -122,10 +122,11 @@ class FlashAttentionPyTorch(torch.autograd.Function):
 #  Uses PyTorch + torch.compile, following Equations 13-19 from the PDF.
 # ──────────────────────────────────────────────────────────────────────────
 
-def _flash_backward_impl(Q, K, V, O, L, dO, is_causal):
+def _flash_backward(Q, K, V, O, L, dO, is_causal):
     """Compute dQ, dK, dV using recomputation (Equations 13-19).
 
     This avoids storing the full attention matrix P by recomputing it from Q, K, L.
+    Intermediate tensors (S, P, dP) are freed early to reduce peak memory.
     """
     batch, N_q, d = Q.shape
     N_k = K.shape[1]
@@ -143,6 +144,7 @@ def _flash_backward_impl(Q, K, V, O, L, dO, is_causal):
 
     # Eq 14: P = exp(S - L)
     P = torch.exp(S - L.unsqueeze(-1))  # (batch, N_q, N_k)
+    del S  # Free S — no longer needed
 
     # Eq 15: dV = P^T @ dO
     dV = torch.bmm(P.transpose(-2, -1), dO)  # (batch, N_k, d)
@@ -155,6 +157,7 @@ def _flash_backward_impl(Q, K, V, O, L, dO, is_causal):
 
     # Eq 17: dS = P * (dP - D)
     dS = P * (dP - D.unsqueeze(-1))  # (batch, N_q, N_k)
+    del P, dP  # Free P and dP — no longer needed
 
     # Eq 18: dQ = dS @ K / sqrt(d)
     dQ = torch.bmm(dS, K) * scale  # (batch, N_q, d)
@@ -163,10 +166,6 @@ def _flash_backward_impl(Q, K, V, O, L, dO, is_causal):
     dK = torch.bmm(dS.transpose(-2, -1), Q) * scale  # (batch, N_k, d)
 
     return dQ, dK, dV
-
-
-# Compile the backward for speed
-_flash_backward = torch.compile(_flash_backward_impl)
 
 
 # ──────────────────────────────────────────────────────────────────────────
