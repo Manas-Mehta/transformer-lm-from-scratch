@@ -9,10 +9,9 @@
 #SBATCH --requeue
 
 # 1.1.6: Memory Profiling — 2.7B model
-# Fixed: optimizer only created when mode=both (was always created, causing OOM)
-# (a) Two pickle files for memory_viz: forward-only + full training (ctx=128)
-# (b) Peak memory per context length (128, 256, 512) for forward + full training
-# (c) Same as (b) but with BF16 mixed precision
+# batch_size=1 required: 2.7B params (10GB) + AdamW state (20GB) + grads (10GB) = 40GB
+# leaves almost no room for activations at batch>1
+# Also: set_to_none=True in profile_memory to free grads before each step
 
 singularity exec --bind /scratch --nv \
   --overlay /scratch/mm14444/overlay-25GB-500K.ext3:ro \
@@ -23,7 +22,7 @@ singularity exec --bind /scratch --nv \
     cd /scratch/mm14444/transformer-lm-from-scratch/systems_and_parallelism
 
     echo "============================================"
-    echo "  1.1.6 — Memory Profiling (2.7B)"
+    echo "  1.1.6 — Memory Profiling (2.7B, batch=1)"
     echo "  Date: $(date)"
     echo "  GPU:  $(nvidia-smi --query-gpu=name --format=csv,noheader)"
     echo "============================================"
@@ -33,7 +32,7 @@ singularity exec --bind /scratch --nv \
         echo ""
         echo "====== 2.7B forward, ctx=$CTX, FP32 ======"
         uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX \
+            --model_size 2.7B --context_length $CTX --batch_size 1 \
             --mode forward --profile_memory \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"
@@ -44,7 +43,7 @@ singularity exec --bind /scratch --nv \
         echo ""
         echo "====== 2.7B both, ctx=$CTX, FP32 ======"
         uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX \
+            --model_size 2.7B --context_length $CTX --batch_size 1 \
             --mode both --profile_memory \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"
@@ -55,7 +54,7 @@ singularity exec --bind /scratch --nv \
         echo ""
         echo "====== 2.7B forward, ctx=$CTX, BF16 ======"
         uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX \
+            --model_size 2.7B --context_length $CTX --batch_size 1 \
             --mode forward --profile_memory --mixed_precision \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"
@@ -65,7 +64,7 @@ singularity exec --bind /scratch --nv \
         echo ""
         echo "====== 2.7B both, ctx=$CTX, BF16 ======"
         uv run python student/benchmark.py \
-            --model_size 2.7B --context_length $CTX \
+            --model_size 2.7B --context_length $CTX --batch_size 1 \
             --mode both --profile_memory --mixed_precision \
             --warmup_steps 3 \
         || echo "FAILED (likely OOM) — skipping"

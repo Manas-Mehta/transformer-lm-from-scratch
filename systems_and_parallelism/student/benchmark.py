@@ -247,7 +247,7 @@ def profile_memory(model, input_ids, mode, warmup_steps, amp_context, args):
     # Warmup (match the mode so we don't allocate unnecessary state)
     for _ in range(warmup_steps):
         if optimizer is not None:
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
         with amp_context:
             output = model(input_ids)
         if mode in ("backward", "both"):
@@ -263,7 +263,7 @@ def profile_memory(model, input_ids, mode, warmup_steps, amp_context, args):
 
     # One measured step
     if optimizer is not None:
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
     with amp_context:
         output = model(input_ids)
     if mode in ("backward", "both"):
