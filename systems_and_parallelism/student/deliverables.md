@@ -56,7 +56,16 @@ GPU: NVIDIA A100-SXM4-40GB
 
 ## 1.1.4(e) Softmax vs Matmul in Attention
 
-> From CUDA kernel profiling, softmax-related kernels (`reduce_kernel MaxOps` + `exp_kernel`) take ~1-2% of GPU time while all `ampere_sgemm_*` matmul kernels take 79-85%, consistent with the ~64x FLOPs difference (matmul does O(S^2 * d_k) vs softmax's O(S^2) with d_k=64). Matmul also better utilizes the GPU's tensor cores (compute-bound) while softmax is memory-bandwidth-bound, further widening the runtime gap.
+> **PENDING RE-RUN** — NVTX attention monkey-patch was previously applied before warmup, inflating softmax timings. Code now fixed (monkey-patch applied after warmup). Re-run `sbatch student/run_1_1_4e_rerun.sbatch` and fill in table + answer below.
+>
+> | Model | ctx | QK matmul (ms) | softmax (ms) | V matmul (ms) | softmax % of attn |
+> |---|---|---|---|---|---|
+> | small | 128 | PENDING | PENDING | PENDING | PENDING |
+> | small | 256 | PENDING | PENDING | PENDING | PENDING |
+> | medium | 128 | PENDING | PENDING | PENDING | PENDING |
+> | medium | 256 | PENDING | PENDING | PENDING | PENDING |
+>
+> From CUDA kernel profiling, softmax-related kernels take ~1-2% of GPU time while matmul kernels take 79-85%, consistent with the ~64x FLOPs difference (matmul does O(S^2 * d_k) vs softmax's O(S^2) with d_k=64). Matmul also better utilizes the GPU's tensor cores (compute-bound) while softmax is memory-bandwidth-bound, further widening the runtime gap.
 
 ---
 

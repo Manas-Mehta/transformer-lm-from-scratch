@@ -169,7 +169,7 @@ function benchmark(model, input_ids, num_steps):
     return times
 '''
 
-def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=None, amp_context=None):
+def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=None, amp_context=None, nvtx_attention=False):
     """
     Run warmup, then timed measurement steps.
     Returns list of times in seconds.
@@ -190,6 +190,10 @@ def benchmark(model, input_ids, mode, warmup_steps, measure_steps, optimizer=Non
                 if optimizer is not None:
                     optimizer.step()
             torch.cuda.synchronize()
+
+    # Apply NVTX attention monkey-patch AFTER warmup so warmup timings aren't polluted
+    if nvtx_attention:
+        a1_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
 
     # ─── Phase 2: Measurement ───
     times = []
@@ -279,12 +283,9 @@ def main():
     print(f"Warmup: {args.warmup_steps}, Measure: {args.measure_steps}")
     print()
     
-    # Monkey-patch attention with NVTX annotations if requested (for 1.1.4e)
     if args.nvtx_attention:
-        a1_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
-        print("NVTX attention annotations: ENABLED")
+        print("NVTX attention annotations: ENABLED (applied after warmup)")
 
-        
     # Create model and data
     model = create_model(args.model_size, args.vocab_size, args.context_length)
     input_ids = generate_random_batch(args.batch_size, args.context_length, args.vocab_size)
@@ -310,7 +311,8 @@ def main():
     # Run benchmark
     times = benchmark(model, input_ids, args.mode,
                       args.warmup_steps, args.measure_steps,
-                      optimizer=optimizer, amp_context=amp_context)
+                      optimizer=optimizer, amp_context=amp_context,
+                      nvtx_attention=args.nvtx_attention)
 
     # Report results
     mean_time = np.mean(times)
