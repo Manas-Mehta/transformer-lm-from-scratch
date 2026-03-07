@@ -34,6 +34,8 @@ from a1_basics.model import BasicsTransformerLM
 import math
 import torch.cuda.nvtx as nvtx   # NVTX annotations for nsys profiling
 import a1_basics.model            # needed for monkey-patching attention
+from a1_basics.nn_utils import softmax  # staff's softmax (for annotated attention)
+from einops import einsum               # staff's einsum (for annotated attention)
 
 
 
@@ -109,26 +111,27 @@ def create_model(model_size, vocab_size, context_length):
     model = model.to("cuda")  # Move model to GPU
     return model
 
+@nvtx.range("scaled dot product attention")
 def annotated_scaled_dot_product_attention(Q, K, V, mask=None):
-    """NVTX-annotated version of the staff's attention function.
-    Used for 1.1.4(e) to compare softmax vs matmul time.
-    Each NVTX range is followed by torch.cuda.synchronize() so the
+    """NVTX-annotated version of the staff's scaled_dot_product_attention.
+    Uses the exact same operations (einops einsum, staff softmax) with
+    NVTX ranges + torch.cuda.synchronize() inside each range so the
     CPU-side NVTX timing reflects actual GPU execution time."""
     d_k = K.shape[-1]
 
-    with nvtx.range("attention_matmul_QK"):
-        attention_scores = torch.einsum("...qd,...kd->...qk", Q, K) / math.sqrt(d_k)
+    with nvtx.range("computing attention scores"):
+        attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
         torch.cuda.synchronize()
 
     if mask is not None:
         attention_scores = torch.where(mask, attention_scores, float("-inf"))
 
-    with nvtx.range("attention_softmax"):
-        attention_weights = torch.softmax(attention_scores, dim=-1)
+    with nvtx.range("computing softmax"):
+        attention_weights = softmax(attention_scores, dim=-1)
         torch.cuda.synchronize()
 
-    with nvtx.range("attention_matmul_V"):
-        output = torch.einsum("...qk,...kd->...qd", attention_weights, V)
+    with nvtx.range("final matmul"):
+        output = einsum(attention_weights, V, "... query key, ... key d_v -> ... query d_v")
         torch.cuda.synchronize()
 
     return output
