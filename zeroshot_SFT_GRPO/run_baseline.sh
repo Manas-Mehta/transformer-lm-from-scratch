@@ -18,13 +18,13 @@ singularity exec --bind /scratch --nv \
     export PATH=/ext3/miniconda3/bin:$PATH
     set -euo pipefail
 
-    # Keep uv cache on /scratch so packages are not re-downloaded every run
-    export UV_CACHE_DIR=/scratch/mm14444/.cache/uv
-    export UV_LINK_MODE=copy
+    # ── Persistent caches on /scratch (survive across jobs) ──────────────────
+    export UV_CACHE_DIR=/scratch/mm14444/.cache/uv        # uv packages
+    export UV_LINK_MODE=copy                               # suppress hardlink warning
+    export HF_HOME=/scratch/mm14444/.cache/huggingface    # HF models + datasets
 
+    # ── Repo + HPC pyproject ─────────────────────────────────────────────────
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
-
-    # Use HPC pyproject (has vllm) instead of the mac-only default
     cp pyproject-hpc.toml pyproject.toml
     cp uv-hpc.lock uv.lock
 
