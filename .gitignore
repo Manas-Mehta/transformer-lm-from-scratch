@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data & model files (large — use data-distrib/ locally, not on GitHub)
+*.arrow
+*.parquet
+*.bin
+*.safetensors
+*.pkl
+*.pickle
+data-distrib/
+# .npz excluded from gitignore — tests/_snapshots/*.npz are needed by the test suite
+
+# Logs & outputs
+*.out
+*.log
+wandb/
+runs/
+
+# OS
+.DS_Store
+.DS_Store?
+
+# IDE
+.vscode/
+.idea/
+
+# uv
+uv.lock
+uv-mac.lock
+
+# Assignment PDFs (already committed separately if needed)
+# Uncomment to also ignore:
+# *.pdf
