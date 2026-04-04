@@ -724,37 +724,60 @@ When running with `--verbose`, the script prints examples from each failure cate
 
 #### Part (a) — Category Analysis
 
-**Results (fill in after running):**
+**Results:**
 ```
-Format=1, Answer=1 (correct):      ___ / 500  (___%)
-Format=1, Answer=0 (wrong):        ___ / 500  (___%)
-Format=0, Answer=0 (no \boxed{}):  ___ / 500  (___%)
-Overall accuracy:                  ___
+Format=1, Answer=1 (correct):      304 / 500  (60.8%)
+Format=1, Answer=0 (wrong):        166 / 500  (33.2%)
+Format=0, Answer=0 (no \boxed{}):   30 / 500   (6.0%)
+Overall accuracy:                  0.6080
 ```
 
-**Format=0 Analysis (fill in with real examples from --verbose output):**
+---
 
-Look at your logged examples. Common patterns to identify:
-- Is the model truncating before it writes the `\boxed{}` line? (output near 2048 tokens?)
-- Is the model producing a different answer format (e.g., `The answer is 42.` without LaTeX)?
-- Is the model generating repetitive/degenerate text that never reaches a conclusion?
-- Is the `\fbox{}` command used instead of `\boxed{}`?
+**Format=0 Analysis — 30 cases (6%)**
 
-**Is it the model's fault or the parser's fault?**
-- Model fault: output ends abruptly, no attempt at a boxed answer
-- Parser fault: model clearly writes an answer but in a format the regex misses (rare)
+> **Verdict: Primarily the model's fault, not the parser.**
 
-**Format=1, Answer=0 Analysis (fill in with real examples):**
+The parser correctly handles both `\boxed{}` and `\fbox{}` with proper brace-matching. The issue is the model failing to follow the required output format. Three distinct failure patterns observed:
 
-Common patterns:
-- Model made a computation error (the most common case)
-- Model correct conceptually but expressed answer differently (e.g., `\boxed{x=3}` vs GT `3`)
-- Model answered a related but different question
-- Edge case in normalization (e.g., sets, vectors, multi-part answers)
+**Pattern 1 — Degenerate/repetitive output (e.g., Example 1):**
+The model enters a loop-like state, generating repetitive tokens (`expr[i+176], expr[i+177], expr[i+178]...`) that hit the 2048 token limit without ever concluding. The model's "reasoning" never reaches a final answer step.
 
-#### Part (b) — Summary Sentence (fill in after running)
+**Pattern 2 — Plain-text conclusion without `\boxed{}` (e.g., Examples 2, 3, 10):**
+The model produces a valid chain-of-thought and reaches a correct-looking final answer, but concludes with natural language like *"x ≈ 1.25, which can be expressed as 5/4"* or *"there are 1251 students"* — no LaTeX box. The model understood the problem but ignored the format instruction.
 
-> "Qwen 2.5 Math 1.5B achieves ___% accuracy zero-shot on the MATH test set, with ___% of responses formatted correctly (using `\boxed{}`) and ___% containing no parseable answer format at all."
+**Pattern 3 — Code execution hits internal limit (e.g., Example 5):**
+The model uses a Python code-interpreter style, generates multiple code blocks, and then outputs `Reach max function call limit.` — never wrapping up in `\boxed{}`. The model gets stuck in a code-based loop before reaching the conclusion template.
+
+**Why it's the model's fault:** The prompt explicitly instructs *"Conclude your response with: Therefore, the final answer is: $\boxed{answer}$."* All 30 failures represent the model not following this instruction — either from repetition collapse, plain-text conclusions, or code-loop exhaustion.
+
+---
+
+**Format=1, Answer=0 Analysis — 166 cases (33.2%)**
+
+> **Verdict: Overwhelmingly the model's math errors; ~1-2 borderline parser cases.**
+
+**Pattern 1 — Genuine computation error (majority of cases):**
+- Example 1: GT=90°, model gets 100.30° — wrong formula for angle between lines
+- Example 3: GT=√51, model gets 4.9 — misapplies sine relationship
+- Example 5: GT=π, model gets π/2 — off-by-two in phase shift of sinusoidal
+- Example 6: GT=28, model gets 68 — confuses exterior/interior angle theorem
+- Examples 9,10: GT=144,720 — wrong combinatorics setup for circular permutations
+
+**Pattern 2 — Solves a related but wrong sub-problem:**
+- Example 2: GT=3/56, model gets 4/5 — applies Lagrange interpolation at wrong evaluation point
+- Example 4: GT=6-5i, model gets an incorrect complex rotation — right approach, wrong arithmetic
+
+**Pattern 3 — Borderline parser case (rare):**
+- Example 8: GT=`1,-2`, model outputs `\boxed{-2, 1}` — mathematically equivalent set, but the grader does ordered string comparison on tuples. This is arguably the parser's limitation rather than the model being wrong.
+
+**Why it's mostly the model's fault:** The model is using a code-execution reasoning style (Python + sympy) which introduces floating-point errors, wrong library calls, and intermediate mistakes that compound. It correctly formats the answer in `\boxed{}` but the math inside is wrong.
+
+---
+
+#### Part (b) — Summary (for writeup)
+
+> "Qwen 2.5 Math 1.5B achieves 60.8% accuracy zero-shot on 500 MATH problems, demonstrating strong baseline mathematical reasoning: 94% of responses include a correctly-formatted `\boxed{}` answer, with the dominant failure mode (33.2%) being mathematical computation errors rather than format violations."
 
 ---
 
