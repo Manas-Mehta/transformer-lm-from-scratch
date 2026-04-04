@@ -20,6 +20,10 @@ singularity exec --bind /scratch --nv \
 
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
 
+    # Use HPC pyproject (has vllm) instead of the mac-only default
+    cp pyproject-hpc.toml pyproject.toml
+    cp uv-hpc.lock uv.lock
+
     echo "============================================"
     echo "  Part 3 — Zero-Shot MATH Baseline"
     echo "  Date: $(date)"
