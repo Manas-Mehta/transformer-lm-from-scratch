@@ -34,6 +34,7 @@ singularity exec --bind /scratch --nv \
         --model Qwen/Qwen2.5-Math-1.5B \
         --max-examples 500 \
         --gpu-memory-utilization 0.85 \
+        --skip-intellect \
         --verbose
 
     echo "============================================"

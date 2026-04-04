@@ -98,6 +98,8 @@ def main():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--verbose", action="store_true",
                         help="Print example outputs for each failure category")
+    parser.add_argument("--skip-intellect", action="store_true",
+                        help="Skip Intellect test (use when data path unavailable)")
     args = parser.parse_args()
 
     prompt_template = load_prompt("intellect")
@@ -108,23 +110,24 @@ def main():
         gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
-    # Evaluate on Intellect test
-    print(f"\n=== Intellect Test ({args.intellect_path}) ===")
-    dataset = load_from_disk(args.intellect_path)
-    if args.max_examples:
-        dataset = dataset.select(range(min(args.max_examples, len(dataset))))
+    # Evaluate on Intellect test (optional — skip if data path not available)
+    if not args.skip_intellect:
+        print(f"\n=== Intellect Test ({args.intellect_path}) ===")
+        dataset = load_from_disk(args.intellect_path)
+        if args.max_examples:
+            dataset = dataset.select(range(min(args.max_examples, len(dataset))))
 
-    prompts, gts = [], []
-    for ex in dataset:
-        msgs = ex.get("messages", [])
-        sys_msg = next((m["content"] for m in msgs if m["role"] == "system"), "")
-        user_msg = next((m["content"] for m in msgs if m["role"] == "user"), "")
-        prompts.append(sys_msg + "\n\n" + user_msg if sys_msg else user_msg)
-        gts.append(ex.get("ground_truth", ""))
+        prompts, gts = [], []
+        for ex in dataset:
+            msgs = ex.get("messages", [])
+            sys_msg = next((m["content"] for m in msgs if m["role"] == "system"), "")
+            user_msg = next((m["content"] for m in msgs if m["role"] == "user"), "")
+            prompts.append(sys_msg + "\n\n" + user_msg if sys_msg else user_msg)
+            gts.append(ex.get("ground_truth", ""))
 
-    print(f"[Sample prompt tail] ...{prompts[0][-200:]}")
-    acc, counts, examples = evaluate(llm, prompts, gts, verbose=args.verbose)
-    print(f"Intellect Accuracy: {acc:.4f}")
+        print(f"[Sample prompt tail] ...{prompts[0][-200:]}")
+        acc, counts, examples = evaluate(llm, prompts, gts, verbose=args.verbose)
+        print(f"Intellect Accuracy: {acc:.4f}")
 
     # Evaluate on MATH
     print("\n=== MATH Test (hiyouga/math12k) ===")
