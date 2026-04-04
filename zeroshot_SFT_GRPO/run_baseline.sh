@@ -17,7 +17,6 @@ singularity exec --bind /scratch --nv \
     source /ext3/miniconda3/etc/profile.d/conda.sh
     export PATH=/ext3/miniconda3/bin:$PATH
     set -euo pipefail
-    conda activate llmr
 
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
 
