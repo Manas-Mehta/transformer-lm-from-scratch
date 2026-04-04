@@ -11,7 +11,7 @@
 |---|---------|--------|--------------|
 | [1](#1-assignment-overview) | Assignment Overview | ✅ Theory done | None (reading/setup) |
 | [2](#2-reasoning-with-language-models) | Reasoning with Language Models | ✅ Theory done | None |
-| [3](#3-measuring-zero-shot-math-performance) | Zero-Shot MATH Baseline | ⬜ | `math_baseline` (8 pts): written commentary |
+| [3](#3-measuring-zero-shot-math-performance) | Zero-Shot MATH Baseline | ✅ Theory done | `math_baseline` (8 pts): written commentary |
 | [4](#4-supervised-finetuning-for-math) | Supervised Finetuning | ⬜ | `tokenize_prompt_and_output` (4), `compute_entropy` (4), `get_response_log_probs` (ungraded), `masked_normalize` (2), `sft_microbatch_train_step` (4), `sft_experiment` (10) |
 | [5](#5-countdown) | Countdown Dataset | ⬜ | None (reading) |
 | [6](#6-primer-on-policy-gradients) | Policy Gradient Theory | ⬜ | Written questions |
@@ -455,24 +455,425 @@ The question you should keep in mind throughout: **Which approach is best, and w
 
 ## 3 Measuring Zero-Shot MATH Performance
 
-> *This section will be developed when we reach Part 3. Outline below.*
+> **Deliverable:** `math_baseline` (8 pts) — run on HPC with vLLM, fill in the results table, write commentary.
 
-### Contents of Part 3
-- **3.1 Using vLLM for offline inference** — How to use evaluate.py
-- **3.2 Zero-shot MATH Baseline** — Run the baseline, analyze results
+---
 
-### Deliverables
-**Problem `math_baseline` (8 pts):**
-- (a) Analyze format/answer reward distributions. Commentary on ≥10 examples where format reward=0 and ≥10 where format=1 but answer=0.
-- (b) 1-2 sentences: how well does Qwen 2.5 Math 1.5B do zero-shot?
+### 3.1 Using vLLM for Offline Language Model Inference
 
-**Outputs (fill in after running):**
+#### Theory
+
+**What is offline inference?**
+
+There are two ways to serve an LLM:
+- **Online serving**: a server waits for requests one at a time (e.g., ChatGPT API). Latency matters most.
+- **Offline batched inference**: you have a fixed dataset of prompts and want to process all of them as fast as possible. Throughput matters most.
+
+For evaluation (Part 3) and training rollouts (Parts 4, 7), we always have a fixed batch of prompts. This is the offline case, and vLLM is built exactly for this.
+
+**What makes vLLM fast?**
+
+Running a standard HuggingFace `model.generate()` on 500 prompts sequentially is slow because:
+1. Each prompt has a different length — naive batching wastes GPU memory padding shorter ones
+2. The KV cache (the stored key/value tensors from attention) is allocated per-request and grows over time — memory fragmentation is a real problem
+
+vLLM addresses both:
+
+| vLLM technique | What it does | Analogy |
+|----------------|-------------|---------|
+| **PagedAttention** | Stores KV cache in fixed-size "pages" (non-contiguous memory), allocated on demand | Like OS virtual memory — avoids fragmentation |
+| **Continuous batching** | When one sequence finishes generating, immediately slots in a new one without waiting for the whole batch | Like a restaurant seating new customers the moment a table opens |
+| **Optimized CUDA kernels** | Custom GPU kernels for attention, faster than PyTorch's default | Hardware-level speed |
+
+The result: vLLM can process 500 prompts roughly **10-20x faster** than naive HuggingFace generation.
+
+**Important: vLLM only works on Linux with NVIDIA GPUs.** On Apple Silicon Macs it fails at import. Part 3 must be run on HPC.
+
+#### Code Structure Sketch
+
+```python
+from vllm import LLM, SamplingParams
+
+# 1. Load model (downloads from HuggingFace cache or local path)
+llm = LLM(
+    model="Qwen/Qwen2.5-Math-1.5B",
+    trust_remote_code=True,           # Qwen requires this
+    gpu_memory_utilization=0.85,       # leave 15% headroom
+)
+
+# 2. Define generation settings
+params = SamplingParams(
+    temperature=0.0,   # greedy: always pick highest-prob token
+    max_tokens=2048,   # max response length
+)
+
+# 3. Generate for an entire batch at once
+outputs = llm.generate(prompts, params)  # prompts is a list[str]
+
+# 4. Access results
+for output in outputs:
+    text = output.outputs[0].text   # the generated string
+    # output.outputs[0].token_ids   # the token IDs if you need them
 ```
-Format=1, Answer=1: ___ / 500
-Format=1, Answer=0: ___ / 500
-Format=0, Answer=0: ___ / 500
-Overall accuracy:   ___
+
+**Why temperature=0.0 for evaluation?** Greedy decoding (always pick the most probable next token) is **deterministic** — running the same model twice on the same prompt gives the same answer. This makes evaluation reproducible. For GRPO training, we need temperature > 0 to get diverse rollouts (so the model can explore different reasoning paths).
+
+---
+
+### 3.2 Zero-Shot MATH Baseline
+
+#### Theory: What "Zero-Shot" Means
+
+**Zero-shot** means: no training, no finetuning, no examples in the prompt. Just:
+1. Load the model exactly as it was pretrained
+2. Give it the task prompt + the question
+3. Read its output
+
+This is our **baseline** — the floor we're trying to beat with SFT and GRPO.
+
+For MATH, the prompt is (from `student/prompts/intellect.prompt`):
+
 ```
+Solve the following math problem efficiently and clearly. Think carefully and step by
+step about your response and reason before providing a final response. Conclude your
+response with:
+
+Therefore, the final answer is: $\boxed{answer}$. I hope it is correct.
+
+Where [answer] is just the final number or expression that solves the problem.
+```
+
+The question is appended to this. The model then generates a response (hopefully with chain-of-thought steps + a `\boxed{answer}` at the end).
+
+**Why does this prompt ask for `\boxed{}`?** Because we can only compare the model's answer to the ground truth if we can *extract* that answer from a long text response. The `\boxed{}` LaTeX command is our extraction anchor: `extract_answer()` finds the last `\boxed{...}` in the output and treats that as the model's answer.
+
+---
+
+### 3.3 The Reward Function: Internals
+
+This is important to understand deeply — the same function is used throughout the assignment.
+
+`question_only_reward_fn(response, ground_truth)` lives in `student/drgrpo_grader.py`.
+
+**What it returns:**
+```python
+{"format_reward": float, "answer_reward": float, "reward": float}
+```
+
+**Step-by-step trace through the function:**
+
+```
+Step 1: model_answer = extract_answer(response)
+        └─ Finds the LAST \boxed{...} in the response
+        └─ Uses brace-matching (not just regex) to handle nested braces
+        └─ Returns None if no \boxed{} found at all
+
+Step 2: if model_answer is None:
+        └─ return {"format_reward": 0.0, "answer_reward": 0.0, "reward": 0.0}
+           ← CAN'T grade → both rewards are 0
+
+Step 3: is_correct = grade(model_answer, ground_truth)
+        └─ grade() tries two methods:
+           (a) grade_answer_mathd() — Dan Hendrycks' normalization (handles units,
+               fractions, whitespace), then string compare
+           (b) grade_answer_sympy() — symbolic math comparison via SymPy
+               e.g. "0.5" == "\frac{1}{2}" after simplification
+        └─ Returns True if either method says "equal"
+
+Step 4: if is_correct:
+        └─ return {"format_reward": 1.0, "answer_reward": 1.0, "reward": 1.0}
+        else:
+        └─ return {"format_reward": 1.0, "answer_reward": 0.0, "reward": 0.0}
+           ← Format reward is 1 even when wrong! (because \boxed{} was present)
+```
+
+**The four outcome categories:**
+
+| format_reward | answer_reward | What happened | What to look for |
+|:---:|:---:|---|---|
+| 1 | 1 | Correct `\boxed{}`, right answer | ✅ Happy path |
+| 1 | 0 | Correct `\boxed{}`, wrong answer | Model reasoned but made a mistake |
+| 0 | 0 | No `\boxed{}` at all | Model didn't follow format, or truncated |
+| 0 | 1 | **Impossible** | Can't grade without format |
+
+**Why format=0 can happen:**
+1. Model produces step-by-step reasoning but forgets the final `\boxed{}` line
+2. Model output is truncated at `max_tokens=2048` mid-response
+3. Model produces a different format entirely (e.g., `answer: 42` instead of `\boxed{42}`)
+4. The model hallucinates text but never concludes properly
+5. Model produces `\fbox{answer}` (a different LaTeX command — `last_boxed_only_string` handles this too, but only `\boxed` and `\fbox`)
+
+**Why format=1, answer=0 can happen (harder cases — sometimes parser fault, not model fault):**
+1. Model writes `\boxed{x = 3}` but ground truth is `3` — normalization may miss this
+2. Model writes `\boxed{\frac{1}{2}}` for a problem where GT is `0.5` — SymPy should handle this, but edge cases exist
+3. Model just got the math wrong — this is the model's fault
+4. Implicit vs explicit negation: `\boxed{-\frac{1}{2}}` vs `\boxed{-0.5}` — tricky
+
+---
+
+### 3.4 Code: Modified `evaluate.py`
+
+The starter `evaluate.py` only computes overall accuracy. For Part 3(a), we need to:
+1. **Count all three categories** (format=1/answer=1, format=1/answer=0, format=0/answer=0)
+2. **Log examples** from each failure category so we can analyze them
+
+#### Code Structure Sketch (what to add)
+
+```python
+# Current: only tracks reward["reward"] (= answer_reward)
+correct += reward["reward"]
+
+# Needed: track format_reward and answer_reward separately
+fmt = int(reward["format_reward"])   # 0 or 1
+ans = int(reward["answer_reward"])   # 0 or 1
+
+if fmt == 1 and ans == 1:  → counts["f1a1"] += 1
+if fmt == 1 and ans == 0:  → counts["f1a0"] += 1  + save example
+if fmt == 0:               → counts["f0a0"] += 1  + save example
+```
+
+#### Actual Code
+
+Replace the contents of `student/evaluate.py` with the version that tracks categories and logs examples. The file is at [student/evaluate.py](student/evaluate.py):
+
+```python
+"""Evaluation script for MATH and Intellect test sets with category breakdown."""
+
+from pathlib import Path
+
+from datasets import load_dataset, load_from_disk
+from tqdm import tqdm
+from vllm import LLM, SamplingParams
+
+from student.drgrpo_grader import question_only_reward_fn
+
+
+def load_prompt(name: str = "intellect") -> str:
+    path = Path(__file__).parent / "prompts" / f"{name}.prompt"
+    return path.read_text()
+
+
+def evaluate(llm, prompts, ground_truths, verbose=False, n_examples=10):
+    """Run evaluation and return accuracy with format/answer category breakdown.
+
+    Returns:
+        accuracy: float
+        counts: dict with keys f1a1, f1a0, f0a0
+        examples: dict with lists of failure examples for each category
+    """
+    params = SamplingParams(temperature=0.0, max_tokens=2048)
+    outputs = llm.generate(prompts, params)
+
+    counts = {"f1a1": 0, "f1a0": 0, "f0a0": 0}
+    examples = {"f1a0": [], "f0a0": []}
+
+    for i, output in enumerate(tqdm(outputs, desc="Grading")):
+        text = output.outputs[0].text
+        reward = question_only_reward_fn(text, ground_truths[i])
+        fmt = int(reward["format_reward"])
+        ans = int(reward["answer_reward"])
+
+        if fmt == 1 and ans == 1:
+            counts["f1a1"] += 1
+        elif fmt == 1 and ans == 0:
+            counts["f1a0"] += 1
+            if len(examples["f1a0"]) < n_examples:
+                examples["f1a0"].append({
+                    "prompt_tail": prompts[i][-300:],
+                    "output": text,
+                    "ground_truth": ground_truths[i],
+                })
+        else:  # fmt == 0, ans == 0
+            counts["f0a0"] += 1
+            if len(examples["f0a0"]) < n_examples:
+                examples["f0a0"].append({
+                    "prompt_tail": prompts[i][-300:],
+                    "output": text,
+                    "ground_truth": ground_truths[i],
+                })
+
+    n = len(outputs)
+    accuracy = counts["f1a1"] / n
+
+    print(f"\n=== Category Breakdown (n={n}) ===")
+    print(f"  Format=1, Answer=1 (correct):     {counts['f1a1']:4d} / {n}  ({counts['f1a1']/n:.1%})")
+    print(f"  Format=1, Answer=0 (wrong answer): {counts['f1a0']:4d} / {n}  ({counts['f1a0']/n:.1%})")
+    print(f"  Format=0, Answer=0 (no \\boxed{{}}):  {counts['f0a0']:4d} / {n}  ({counts['f0a0']/n:.1%})")
+    print(f"  Overall accuracy:                  {accuracy:.4f}")
+
+    if verbose:
+        _print_examples(examples)
+
+    return accuracy, counts, examples
+
+
+def _print_examples(examples):
+    """Print logged failure examples for writeup analysis."""
+    sep = "-" * 60
+
+    print(f"\n{sep}")
+    print("FORMAT=0 EXAMPLES (no \\boxed{{}} found in output)")
+    print(sep)
+    for j, ex in enumerate(examples["f0a0"]):
+        print(f"\n[Example {j+1}]")
+        print(f"  Ground truth: {ex['ground_truth']}")
+        print(f"  Output (last 400 chars):\n  ...{ex['output'][-400:]!r}")
+
+    print(f"\n{sep}")
+    print("FORMAT=1 BUT WRONG ANSWER EXAMPLES")
+    print(sep)
+    for j, ex in enumerate(examples["f1a0"]):
+        print(f"\n[Example {j+1}]")
+        print(f"  Ground truth: {ex['ground_truth']}")
+        print(f"  Output (last 400 chars):\n  ...{ex['output'][-400:]!r}")
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="Qwen/Qwen2.5-Math-1.5B")
+    parser.add_argument("--max-examples", type=int, default=500)
+    parser.add_argument("--intellect-path", default="data/intellect_math_train_dev_test/test")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print example outputs for each failure category")
+    args = parser.parse_args()
+
+    prompt_template = load_prompt("intellect")
+
+    llm = LLM(
+        model=args.model,
+        trust_remote_code=True,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
+
+    # Evaluate on Intellect test
+    print(f"\n=== Intellect Test ({args.intellect_path}) ===")
+    dataset = load_from_disk(args.intellect_path)
+    if args.max_examples:
+        dataset = dataset.select(range(min(args.max_examples, len(dataset))))
+
+    prompts, gts = [], []
+    for ex in dataset:
+        msgs = ex.get("messages", [])
+        sys_msg = next((m["content"] for m in msgs if m["role"] == "system"), "")
+        user_msg = next((m["content"] for m in msgs if m["role"] == "user"), "")
+        prompts.append(sys_msg + "\n\n" + user_msg if sys_msg else user_msg)
+        gts.append(ex.get("ground_truth", ""))
+
+    print(f"[Sample prompt tail] ...{prompts[0][-200:]}")
+    acc, counts, examples = evaluate(llm, prompts, gts, verbose=args.verbose)
+    print(f"Intellect Accuracy: {acc:.4f}")
+
+    # Evaluate on MATH
+    print("\n=== MATH Test (hiyouga/math12k) ===")
+    math_ds = load_dataset("hiyouga/math12k", split="test")
+    if args.max_examples:
+        math_ds = math_ds.select(range(min(args.max_examples, len(math_ds))))
+
+    prompts = [prompt_template + "\n\n" + ex["problem"] for ex in math_ds]
+    gts = [ex["answer"] for ex in math_ds]
+
+    print(f"[Sample prompt tail] ...{prompts[0][-200:]}")
+    acc, counts, examples = evaluate(llm, prompts, gts, verbose=args.verbose)
+    print(f"MATH Accuracy: {acc:.4f}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### 3.5 Running on HPC
+
+Part 3 must run on HPC (vLLM requires NVIDIA GPU, not available on Mac).
+
+#### Sbatch Script
+
+Create `zeroshot_SFT_GRPO/run_baseline.sh`:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=math_baseline
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=40GB
+#SBATCH --gres=gpu:1
+#SBATCH --time=01:00:00
+#SBATCH --output=logs/baseline_%j.out
+
+module purge
+module load cuda/11.8
+
+cd /scratch/$USER/nyu-a3/zeroshot_SFT_GRPO
+
+# Run baseline on MATH (500 examples, verbose for example logging)
+uv run python -m student.evaluate \
+    --model Qwen/Qwen2.5-Math-1.5B \
+    --max-examples 500 \
+    --gpu-memory-utilization 0.85 \
+    --verbose \
+    2>&1 | tee logs/baseline_math.log
+```
+
+**To submit:**
+```bash
+sbatch run_baseline.sh
+# Check: squeue -u $USER
+# Watch: tail -f logs/baseline_JOBID.out
+```
+
+**Expected runtime:** ~10-15 minutes for 500 examples on a single A100/V100.
+
+#### What to Look For in the Output
+
+When running with `--verbose`, the script prints examples from each failure category. For the writeup you need:
+- At least 10 examples where format=0: identify the pattern (truncation? wrong format? repetition?)
+- At least 10 examples where format=1 but answer=0: identify whether it's the model's math error or parser failure
+
+---
+
+### 3.6 Deliverables: `math_baseline` (8 pts)
+
+#### Part (a) — Category Analysis
+
+**Results (fill in after running):**
+```
+Format=1, Answer=1 (correct):      ___ / 500  (___%)
+Format=1, Answer=0 (wrong):        ___ / 500  (___%)
+Format=0, Answer=0 (no \boxed{}):  ___ / 500  (___%)
+Overall accuracy:                  ___
+```
+
+**Format=0 Analysis (fill in with real examples from --verbose output):**
+
+Look at your logged examples. Common patterns to identify:
+- Is the model truncating before it writes the `\boxed{}` line? (output near 2048 tokens?)
+- Is the model producing a different answer format (e.g., `The answer is 42.` without LaTeX)?
+- Is the model generating repetitive/degenerate text that never reaches a conclusion?
+- Is the `\fbox{}` command used instead of `\boxed{}`?
+
+**Is it the model's fault or the parser's fault?**
+- Model fault: output ends abruptly, no attempt at a boxed answer
+- Parser fault: model clearly writes an answer but in a format the regex misses (rare)
+
+**Format=1, Answer=0 Analysis (fill in with real examples):**
+
+Common patterns:
+- Model made a computation error (the most common case)
+- Model correct conceptually but expressed answer differently (e.g., `\boxed{x=3}` vs GT `3`)
+- Model answered a related but different question
+- Edge case in normalization (e.g., sets, vectors, multi-part answers)
+
+#### Part (b) — Summary Sentence (fill in after running)
+
+> "Qwen 2.5 Math 1.5B achieves ___% accuracy zero-shot on the MATH test set, with ___% of responses formatted correctly (using `\boxed{}`) and ___% containing no parseable answer format at all."
+
+---
+
+*Last updated: Parts 1–3 completed. Next: Part 4.*
 
 ---
 
@@ -570,4 +971,4 @@ Overall accuracy:   ___
 
 ---
 
-*Last updated: Parts 1–2 completed. Next: Part 3.*
+*Last updated: Parts 1–3 completed. Next: Part 4.*
