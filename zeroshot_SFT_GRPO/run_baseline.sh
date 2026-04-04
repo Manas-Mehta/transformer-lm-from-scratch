@@ -18,6 +18,10 @@ singularity exec --bind /scratch --nv \
     export PATH=/ext3/miniconda3/bin:$PATH
     set -euo pipefail
 
+    # Keep uv cache on /scratch so packages are not re-downloaded every run
+    export UV_CACHE_DIR=/scratch/mm14444/.cache/uv
+    export UV_LINK_MODE=copy
+
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
 
     # Use HPC pyproject (has vllm) instead of the mac-only default
