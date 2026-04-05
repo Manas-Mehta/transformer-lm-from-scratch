@@ -65,7 +65,7 @@ singularity exec --bind /scratch --nv \
         --output-dir /scratch/mm14444/sft-model-'"${N_EXAMPLES:-full}"' \
         --wandb-project nyu-llm-reasoners-a3 \
         --wandb-name sft-n'"${N_EXAMPLES:-full}"' \
-        --wandb-mode online
+        --wandb-mode disabled
 
     echo "============================================"
     echo "  Done! $(date)"

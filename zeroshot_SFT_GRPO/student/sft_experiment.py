@@ -7,6 +7,7 @@ On HPC with 2 GPUs: policy model on cuda:0, vLLM evaluator on cuda:1.
 """
 
 import argparse
+import json
 import os
 import random
 from pathlib import Path
@@ -186,6 +187,7 @@ def main():
     data_gen = infinite_batch_iter(train_prompts, train_outputs, args.batch_size)
     train_step = 0
     eval_step = 0
+    eval_log = []  # list of {"train_step": int, "accuracy": float, "f1a1": int, "f1a0": int, "f0a0": int}
     total_microsteps = args.n_steps * args.gradient_accumulation_steps
 
     print(f"\nStarting SFT: {args.n_steps} optimizer steps "
@@ -238,6 +240,16 @@ def main():
                 print(f"[Eval @ step {train_step}] MATH accuracy: {acc:.4f}  "
                       f"(correct={counts['f1a1']}, wrong={counts['f1a0']}, "
                       f"no_box={counts['f0a0']})\n")
+                eval_log.append({
+                    "train_step": train_step,
+                    "accuracy": acc,
+                    "f1a1": counts["f1a1"],
+                    "f1a0": counts["f1a0"],
+                    "f0a0": counts["f0a0"],
+                })
+                log_path = Path("logs") / f"{run_name}_eval.json"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(json.dumps(eval_log, indent=2))
                 model.train()
 
     # ── Save model ────────────────────────────────────────────────────────────
