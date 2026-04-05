@@ -12,7 +12,7 @@
 | [1](#1-assignment-overview) | Assignment Overview | ✅ Theory done | None (reading/setup) |
 | [2](#2-reasoning-with-language-models) | Reasoning with Language Models | ✅ Theory done | None |
 | [3](#3-measuring-zero-shot-math-performance) | Zero-Shot MATH Baseline | ✅ Theory done | `math_baseline` (8 pts): written commentary |
-| [4](#4-supervised-finetuning-for-math) | Supervised Finetuning | ⬜ | `tokenize_prompt_and_output` (4), `compute_entropy` (4), `get_response_log_probs` (ungraded), `masked_normalize` (2), `sft_microbatch_train_step` (4), `sft_experiment` (10) |
+| [4](#4-supervised-finetuning-for-math) | Supervised Finetuning | 🔄 Code done, HPC pending | `tokenize_prompt_and_output` (4) ✅, `compute_entropy` (4) ✅, `get_response_log_probs` (ungraded) ✅, `masked_normalize` (2) ✅, `sft_microbatch_train_step` (4) ✅, `sft_experiment` (10) 🔄 |
 | [5](#5-countdown) | Countdown Dataset | ⬜ | None (reading) |
 | [6](#6-primer-on-policy-gradients) | Policy Gradient Theory | ⬜ | Written questions |
 | [7](#7-group-relative-policy-optimization) | GRPO Implementation | ⬜ | `compute_group_normalized_rewards` (4), `compute_naive_policy_gradient_loss` (4), `compute_grpo_clip_loss` (4), `compute_policy_gradient_loss` (4), `masked_mean` (2), `grpo_microbatch_train_step` (8), `grpo_train_loop` (15) |
@@ -781,28 +781,371 @@ The model uses a Python code-interpreter style, generates multiple code blocks, 
 
 ---
 
-*Last updated: Parts 1–3 completed. Next: Part 4.*
+## 4 Supervised Finetuning for MATH
+
+> **Deliverables:** `tokenize_prompt_and_output` (4 pts), `compute_entropy` (4 pts), `get_response_log_probs` (ungraded), `masked_normalize` (2 pts), `sft_microbatch_train_step` (4 pts), `sft_experiment` (10 pts — run + writeup)
 
 ---
 
-## 4 Supervised Finetuning for MATH
+### 4.1 Using HuggingFace Models
 
-> *This section will be developed when we reach Part 4. Outline below.*
+#### Theory
 
-### Contents of Part 4
-- **4.1 Using HuggingFace Models** — Loading, forward pass, gradient accumulation
-- **4.2 SFT Helper Methods** — tokenize, compute_entropy, get_response_log_probs, masked_normalize, sft_microbatch_train_step
-- **4.3 SFT Experiment** — Full training run, validation curves
+SFT trains the model to **imitate expert solutions** using cross-entropy loss. The SFT algorithm (Algorithm 1 in the PDF) is:
 
-### Deliverables
-| Problem | Points | Type |
-|---------|--------|------|
-| `tokenize_prompt_and_output` | 4 | Code + test |
-| `compute_entropy` | 4 | Code + test |
-| `get_response_log_probs` | — | Code (not autograded) |
-| `masked_normalize` | 2 | Code + test |
-| `sft_microbatch_train_step` | 4 | Code + test |
-| `sft_experiment` | 10 | Run + writeup |
+```
+for step = 1, ..., n_sft_steps:
+  1. Sample a minibatch D_b of (question, CoT-answer) pairs from the dataset D
+  2. Compute the cross-entropy loss of the answer tokens given the question
+  3. Update theta with gradient descent
+```
+
+**Key difference from zero-shot:** We are changing the model weights. SFT "bakes in" the chain-of-thought reasoning style — after training, the model will naturally produce step-by-step solutions followed by a `\boxed{}` answer, without needing to be prompted to do so.
+
+**Why use the Prime Intellect dataset?** It contains 10,000 expert (question, CoT-solution) pairs from MATH, with the solution in exactly the format we want (step-by-step, ending with `\boxed{}`). The model sees these high-quality traces and learns to mimic them.
+
+**Loading a HuggingFace model in bfloat16:**
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen2.5-Math-1.5B",
+    torch_dtype=torch.bfloat16,    # half-precision: 2x memory savings, same quality
+)
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
+
+# Forward pass: get logits
+logits = model(input_ids).logits   # (batch, seq_len, vocab_size)
+
+# Save after training
+model.save_pretrained(output_dir)
+tokenizer.save_pretrained(output_dir)
+```
+
+**Gradient accumulation** simulates a larger batch size when GPU memory is limited. Instead of updating weights every microbatch, we accumulate gradients over `k` microbatches and divide the loss by `k` before each backward:
+
+```python
+gradient_accumulation_steps = k
+for idx, (inputs, labels) in enumerate(data_loader):
+    loss = compute_loss(inputs, labels) / gradient_accumulation_steps
+    loss.backward()
+
+    if (idx + 1) % gradient_accumulation_steps == 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+Effective batch size = `microbatch_size × gradient_accumulation_steps`.
+
+---
+
+### 4.2 SFT Helper Methods
+
+#### 4.2.1 `tokenize_prompt_and_output` (4 pts)
+
+**Theory**
+
+For each (question, answer) pair, we need:
+- `input_ids`: the token sequence to feed into the model
+- `labels`: the shifted token sequence (the next-token prediction targets)
+- `response_mask`: a boolean mask that is **True only for output tokens** in `labels`
+
+The mask is critical: SFT computes cross-entropy loss **only on the output (response) tokens**. We do not want the model to be penalized for not "predicting" the question tokens — those are just context. Prompts are not things we ever generate; only responses are.
+
+**Construction:**
+
+```
+Full sequence:  [prompt_token_0 ... prompt_token_{p-1} | output_token_0 ... output_token_{o-1}]
+                 <────────────── p tokens ──────────────>│<─────────── o tokens ──────────────>
+                                                         │ (boundary)
+
+input_ids  = full_sequence[:-1]   (drop last token)
+labels     = full_sequence[1:]    (drop first token — this is the next-token at each position)
+
+response_mask on labels:
+  position j is True iff labels[j] is an output token
+  ↔ full_sequence[j+1] is output ↔ j+1 ∈ [p, p+o) ↔ j ∈ [p-1, p+o-1)
+```
+
+So `response_mask[i, start:end] = True` where `start = p_len - 1`, `end = p_len + o_len - 1`.
+
+Multiple examples are padded to the maximum combined length with `pad_token_id` (151643 for Qwen — same as EOS). Padding tokens remain False in the mask.
+
+**Code** → [student/sft.py](student/sft.py) (`tokenize_prompt_and_output`)
+
+```python
+def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
+    all_ids, prompt_lens, output_lens = [], [], []
+    for prompt, output in zip(prompt_strs, output_strs):
+        p_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        o_ids = tokenizer.encode(output, add_special_tokens=False)
+        all_ids.append(p_ids + o_ids)
+        prompt_lens.append(len(p_ids))
+        output_lens.append(len(o_ids))
+
+    max_len = max(len(ids) for ids in all_ids)
+    pad_id = tokenizer.pad_token_id
+    padded = [ids + [pad_id] * (max_len - len(ids)) for ids in all_ids]
+    padded_t = torch.tensor(padded, dtype=torch.long)
+
+    input_ids = padded_t[:, :-1]
+    labels    = padded_t[:, 1:]
+
+    B, seq_len = input_ids.shape
+    response_mask = torch.zeros(B, seq_len, dtype=torch.bool)
+    for i, (p_len, o_len) in enumerate(zip(prompt_lens, output_lens)):
+        response_mask[i, p_len - 1 : p_len + o_len - 1] = True
+
+    return {"input_ids": input_ids, "labels": labels, "response_mask": response_mask}
+```
+
+**Test:** `uv run pytest -k test_tokenize_prompt_and_output` ✅
+
+---
+
+#### 4.2.2 `compute_entropy` (4 pts)
+
+**Theory**
+
+The entropy of a discrete distribution $p$ is:
+$$H(p) = -\sum_{x \in \mathcal{X}} p(x) \log p(x)$$
+
+For LM logits of shape `(batch, seq_len, vocab_size)`, we compute the per-token entropy — i.e., the entropy of each next-token prediction distribution.
+
+**Why track entropy?** During SFT and RL training, entropy tells us how "confident" the model is. Low entropy = peaked distribution = overconfident. High entropy = spread out = uncertain. We track it to monitor whether training is causing the policy to collapse or to become more exploratory.
+
+**Numerically stable implementation:** We use `log_softmax` instead of computing `softmax` and then taking its log — this avoids the exp→log round-trip which can lose precision.
+
+**Code** → [student/sft.py](student/sft.py) (`compute_entropy`)
+
+```python
+def compute_entropy(logits):
+    log_probs = F.log_softmax(logits, dim=-1)   # (B, L, V)
+    probs = torch.exp(log_probs)
+    return -(probs * log_probs).sum(dim=-1)      # (B, L)
+```
+
+**Test:** `uv run pytest -k test_compute_entropy` ✅
+
+---
+
+#### 4.2.3 `get_response_log_probs` (ungraded, but used by SFT and GRPO)
+
+**Theory**
+
+For a causal LM with parameters $\theta$ and a prefix $x_{<t}$, the log-probability of the next token $y$ is:
+$$\log p_\theta(y \mid x_{<t}) = \log[\text{softmax}(f_\theta(x_{<t}))]_y$$
+
+`get_response_log_probs` runs one forward pass to get all token logits, then gathers the log-prob of the actual label at each position.
+
+**Why gather?** The model produces a logit for every vocabulary token at every position. We only care about the log-prob of the actual target token (given by `labels`).
+
+**Code** → [student/sft.py](student/sft.py) (`get_response_log_probs`)
+
+```python
+def get_response_log_probs(model, input_ids, labels, return_token_entropy=False):
+    logits = model(input_ids).logits               # (B, L, V)
+    log_probs_all = F.log_softmax(logits, dim=-1)  # (B, L, V)
+    log_probs = log_probs_all.gather(
+        -1, labels.unsqueeze(-1)
+    ).squeeze(-1)                                  # (B, L)
+
+    result = {"log_probs": log_probs}
+    if return_token_entropy:
+        result["token_entropy"] = compute_entropy(logits)
+    return result
+```
+
+**Important:** This function does NOT use `torch.inference_mode()` internally — the caller controls the gradient context. During SFT training, we need gradients to flow through the log_probs back to the model parameters.
+
+---
+
+#### 4.2.4 `masked_normalize` (2 pts)
+
+**Theory**
+
+SFT loss is computed as the **sum of log-probs over response tokens**, then divided by a normalization constant. Padding and prompt positions must be excluded. `masked_normalize` handles this:
+
+$$\text{output} = \frac{\sum_{j : \text{mask}[j]=1} \text{tensor}[j]}{\text{normalize\_constant}}$$
+
+When `dim=None`, it sums over all elements (global sum). When `dim=k`, it sums along that dimension only.
+
+**Code** → [student/sft.py](student/sft.py) (`masked_normalize`)
+
+```python
+def masked_normalize(tensor, mask, dim=None, normalize_constant=1.0):
+    masked = tensor * mask
+    total = masked.sum() if dim is None else masked.sum(dim=dim)
+    return total / normalize_constant
+```
+
+**Test:** `uv run pytest -k test_masked_normalize` ✅ (all 4 variants)
+
+---
+
+#### 4.2.5 `sft_microbatch_train_step` (4 pts)
+
+**Theory**
+
+The SFT loss is negative log-likelihood on response tokens. Per the PDF, for a microbatch:
+
+$$\mathcal{L} = -\frac{1}{\text{batch} \times \text{GA} \times \text{norm}} \sum_{i,j} \text{log\_probs}[i,j] \cdot \text{mask}[i,j]$$
+
+Rearranging to use `masked_normalize`:
+1. Sum over sequence dim per sample, divide by `normalize_constant` → `masked_normalize(dim=-1)`
+2. Average over batch → `.mean()`
+3. Divide by `gradient_accumulation_steps` → scale for GA
+
+Then call `loss.backward()` so gradients accumulate.
+
+**Why divide by GA?** Because we accumulate gradients for `k` microbatches before an optimizer step. Dividing each microbatch loss by `k` means the total accumulated gradient equals the gradient we'd get from a single batch of `k × microbatch_size` examples.
+
+**Verification against snapshot:** With `policy_log_probs` of shape (2,10) seeded with 42, `response_mask` seeded with 42, GA=2, norm=1.0:
+- `masked_sum = 2.40313`
+- `loss = -2.40313 / (2_batch × 2_GA × 1_norm) = -0.60078` ✅
+- Gradient per masked position = `mask[i,j] / (batch × GA × norm) = 0.25` ✅
+
+**Code** → [student/sft.py](student/sft.py) (`sft_microbatch_train_step`)
+
+```python
+def sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps,
+                               normalize_constant=1.0):
+    per_sample = masked_normalize(policy_log_probs, response_mask,
+                                  dim=-1, normalize_constant=normalize_constant)
+    loss = -per_sample.mean() / gradient_accumulation_steps
+    loss.backward()
+    return loss, {"loss": loss.detach()}
+```
+
+**Tests:** `uv run pytest -k test_sft_microbatch` ✅ (all 3 variants including 10-step grad accumulation)
+
+---
+
+### 4.3 SFT Experiment (10 pts)
+
+#### Theory: The 2-GPU Setup
+
+SFT training requires two simultaneous processes:
+- **GPU 0 (policy):** HuggingFace model in bfloat16, training forward+backward passes
+- **GPU 1 (vLLM evaluator):** vLLM engine for periodic MATH accuracy evaluation
+
+Without the second GPU for vLLM, we'd have to offload the policy weights, load vLLM, evaluate, unload vLLM, reload policy — extremely slow. The 2-GPU setup keeps both resident in memory simultaneously.
+
+**vLLM initialization with patches:**
+
+vLLM needs two patches to work in this non-standard 2-GPU setup:
+1. `torch.distributed.get_world_size` → patched to return 1 (prevents vLLM from expecting distributed training)
+2. `Worker._assert_memory_footprint_increased_during_profiling` → patched to None (skips a profiling test that fails in this setup)
+
+**Syncing policy weights into vLLM:**
+
+Before each evaluation, we copy the policy's current weights directly into vLLM's internal model runner. This is done without reloading from disk:
+
+```python
+state_dict = policy.state_dict()
+llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+llm_model.load_weights(state_dict.items())
+```
+
+#### SFT Dataset Format
+
+The Prime Intellect dataset (`data-distrib/intellect_math/train`, 10,000 examples) has:
+```
+messages[0]: role=system  → the intellect.prompt instructions
+messages[1]: role=user    → the MATH problem
+messages[2]: role=assistant → chain-of-thought solution ending in \boxed{}
+```
+
+For SFT:
+- `prompt = system_msg + "\n\n" + user_msg` — everything the model sees as context
+- `output = assistant_msg` — the chain-of-thought + final answer the model must learn to generate
+
+#### Hyperparameters and Tuning
+
+The assignment asks for a ~40% decrease in training loss. Based on experiment:
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `batch_size` (microbatch) | 2 | GPU memory limit with long sequences |
+| `gradient_accumulation_steps` | 8 | Effective batch = 16 |
+| `lr` | 2e-5 | Standard for SFT fine-tuning |
+| `n_steps` | 200 | Sufficient for loss to drop ~40% |
+| `eval_every` | 50 | Track validation progress 4× per run |
+| `max_eval_examples` | 200 | Balance eval speed vs accuracy |
+
+#### Varying Dataset Size
+
+The deliverable requires running SFT with n_examples ∈ {128, 256, 512, 1024} and the full dataset. Submit 5 separate HPC jobs:
+
+```bash
+git pull
+sbatch run_sft.sh 128
+sbatch run_sft.sh 256
+sbatch run_sft.sh 512
+sbatch run_sft.sh 1024
+sbatch run_sft.sh         # full dataset (10k examples)
+```
+
+Expected: more data → lower validation loss → higher MATH accuracy.
+
+#### Sbatch Script (committed as `run_sft.sh`)
+
+```bash
+#!/bin/bash
+#SBATCH --account=csci_ga_3033_131-2026sp
+#SBATCH --partition=c24m170-a100-2     # 2× A100 40GB
+#SBATCH --gres=gpu:2
+#SBATCH --time=01:30:00
+...
+uv run python -m student.sft_experiment \
+    --model Qwen/Qwen2.5-Math-1.5B \
+    --n-examples $N_EXAMPLES \
+    --batch-size 2 \
+    --gradient-accumulation-steps 8 \
+    --lr 2e-5 \
+    --n-steps 200 \
+    --eval-every 50 \
+    --gpu-memory-utilization 0.45 \   # split with policy GPU
+    --output-dir /scratch/mm14444/sft-model-$N_EXAMPLES
+```
+
+**Note:** Use partition `c24m170-a100-2` (2 GPUs). Policy on `cuda:0`, vLLM on `cuda:1`. `gpu_memory_utilization=0.45` leaves room for the policy on the same node.
+
+---
+
+### 4.4 Deliverables: `sft_experiment` (10 pts)
+
+#### Part 1 — Validation Accuracy Curves
+
+> *(Fill in after running HPC experiments)*
+
+**Validation accuracy at different dataset sizes:**
+
+| n_examples | Final MATH Accuracy | Notes |
+|-----------|-------------------|-------|
+| 128 | TBD | |
+| 256 | TBD | |
+| 512 | TBD | |
+| 1024 | TBD | |
+| Full (10k) | TBD | |
+
+Zero-shot baseline: **60.8%** (from Part 3)
+
+#### Part 2 — Best Model Results
+
+> *(Fill in after running HPC experiments)*
+
+**Best model findings (Intellect test + MATH test):**
+
+TBD
+
+---
+
+*Last updated: Part 4 code and theory done; HPC experiments pending.*
+
+---
 
 ---
 
