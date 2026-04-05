@@ -873,7 +873,32 @@ So `response_mask[i, start:end] = True` where `start = p_len - 1`, `end = p_len 
 
 Multiple examples are padded to the maximum combined length with `pad_token_id` (151643 for Qwen — same as EOS). Padding tokens remain False in the mask.
 
-**Code** → [student/sft.py](student/sft.py) (`tokenize_prompt_and_output`)
+#### Code Structure Sketch
+
+```
+def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
+    # 1. For each (prompt, output) pair:
+    #      - encode prompt → p_ids (no special tokens)
+    #      - encode output → o_ids (no special tokens)
+    #      - record p_len, o_len
+    #      - concatenate → full_ids
+
+    # 2. Pad all full_ids to max_len (right-pad with pad_token_id)
+    #    → padded_t of shape (B, max_len)
+
+    # 3. input_ids = padded_t[:, :-1]    (drop last)
+    #    labels    = padded_t[:, 1:]     (drop first)
+
+    # 4. Build response_mask (B, max_len-1), all False initially
+    #    For each example i:
+    #      start = p_len - 1
+    #      end   = p_len + o_len - 1
+    #      response_mask[i, start:end] = True
+
+    # 5. Return {"input_ids": ..., "labels": ..., "response_mask": ...}
+```
+
+#### Actual Code → [student/sft.py](student/sft.py) (`tokenize_prompt_and_output`)
 
 ```python
 def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
@@ -918,7 +943,17 @@ For LM logits of shape `(batch, seq_len, vocab_size)`, we compute the per-token 
 
 **Numerically stable implementation:** We use `log_softmax` instead of computing `softmax` and then taking its log — this avoids the exp→log round-trip which can lose precision.
 
-**Code** → [student/sft.py](student/sft.py) (`compute_entropy`)
+#### Code Structure Sketch
+
+```
+def compute_entropy(logits):  # logits: (B, L, V)
+    # 1. Convert logits → log-probabilities (numerically stable via log_softmax)
+    # 2. Convert log-probs → probs (exp)
+    # 3. Per-token entropy: -(probs * log_probs).sum over vocab dim
+    # Returns: (B, L)
+```
+
+#### Actual Code → [student/sft.py](student/sft.py) (`compute_entropy`)
 
 ```python
 def compute_entropy(logits):
@@ -942,7 +977,22 @@ $$\log p_\theta(y \mid x_{<t}) = \log[\text{softmax}(f_\theta(x_{<t}))]_y$$
 
 **Why gather?** The model produces a logit for every vocabulary token at every position. We only care about the log-prob of the actual target token (given by `labels`).
 
-**Code** → [student/sft.py](student/sft.py) (`get_response_log_probs`)
+#### Code Structure Sketch
+
+```
+def get_response_log_probs(model, input_ids, labels, return_token_entropy=False):
+    # 1. Forward pass: logits = model(input_ids).logits    → (B, L, V)
+    # 2. log_probs_all = log_softmax(logits, dim=-1)       → (B, L, V)
+    # 3. Gather the log-prob of the actual label at each position:
+    #      log_probs = log_probs_all.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    #      → (B, L): log p(label_t | prefix_t) for each position t
+    # 4. If return_token_entropy: also compute compute_entropy(logits) → (B, L)
+    # 5. Return {"log_probs": ..., "token_entropy": ...}  (token_entropy optional)
+    #
+    # Note: no torch.no_grad() here — caller controls gradient context
+```
+
+#### Actual Code → [student/sft.py](student/sft.py) (`get_response_log_probs`)
 
 ```python
 def get_response_log_probs(model, input_ids, labels, return_token_entropy=False):
@@ -972,7 +1022,19 @@ $$\text{output} = \frac{\sum_{j : \text{mask}[j]=1} \text{tensor}[j]}{\text{norm
 
 When `dim=None`, it sums over all elements (global sum). When `dim=k`, it sums along that dimension only.
 
-**Code** → [student/sft.py](student/sft.py) (`masked_normalize`)
+#### Code Structure Sketch
+
+```
+def masked_normalize(tensor, mask, dim=None, normalize_constant=1.0):
+    # 1. Zero out masked positions: masked = tensor * mask
+    # 2. Sum:
+    #      if dim is None → masked.sum()           (scalar)
+    #      else           → masked.sum(dim=dim)    (reduces that dimension)
+    # 3. Divide by normalize_constant
+    # Returns: normalized sum tensor
+```
+
+#### Actual Code → [student/sft.py](student/sft.py) (`masked_normalize`)
 
 ```python
 def masked_normalize(tensor, mask, dim=None, normalize_constant=1.0):
@@ -1007,7 +1069,25 @@ Then call `loss.backward()` so gradients accumulate.
 - `loss = -2.40313 / (2_batch × 2_GA × 1_norm) = -0.60078` ✅
 - Gradient per masked position = `mask[i,j] / (batch × GA × norm) = 0.25` ✅
 
-**Code** → [student/sft.py](student/sft.py) (`sft_microbatch_train_step`)
+#### Code Structure Sketch
+
+```
+def sft_microbatch_train_step(policy_log_probs, response_mask,
+                               gradient_accumulation_steps, normalize_constant=1.0):
+    # 1. Per-sample loss: sum log_probs over response tokens, divide by normalize_constant
+    #      per_sample = masked_normalize(policy_log_probs, response_mask,
+    #                                   dim=-1, normalize_constant=normalize_constant)
+    #      → shape (B,): one value per example
+
+    # 2. Average over batch, scale for gradient accumulation:
+    #      loss = -per_sample.mean() / gradient_accumulation_steps
+
+    # 3. loss.backward()   ← accumulates gradients into model parameters
+
+    # 4. Return (loss scalar, metadata dict)
+```
+
+#### Actual Code → [student/sft.py](student/sft.py) (`sft_microbatch_train_step`)
 
 ```python
 def sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps,
