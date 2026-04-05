@@ -1107,7 +1107,7 @@ uv run python -m student.sft_experiment \
     --lr 2e-5 \
     --n-steps 200 \
     --eval-every 50 \
-    --gpu-memory-utilization 0.45 \   # split with policy GPU
+    --gpu-memory-utilization 0.85 \   # assignment default
     --output-dir /scratch/mm14444/sft-model-$N_EXAMPLES
 ```
 

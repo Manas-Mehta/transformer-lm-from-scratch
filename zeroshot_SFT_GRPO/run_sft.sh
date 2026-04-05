@@ -61,7 +61,7 @@ singularity exec --bind /scratch --nv \
         --n-steps 200 \
         --eval-every 50 \
         --max-eval-examples 200 \
-        --gpu-memory-utilization 0.45 \
+        --gpu-memory-utilization 0.85 \
         --output-dir /scratch/mm14444/sft-model-'"${N_EXAMPLES:-full}"' \
         --wandb-project nyu-llm-reasoners-a3 \
         --wandb-name sft-n'"${N_EXAMPLES:-full}"' \

@@ -29,7 +29,7 @@ from student.sft import (
 # vLLM helpers (from PDF §4.3 starter code)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.45):
+def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
     """Start a vLLM engine on a specific GPU for evaluation rollouts.
 
     Uses patches from TRL (github.com/huggingface/trl) to:
@@ -119,7 +119,7 @@ def main():
                         help="Evaluate on MATH every this many optimizer steps")
     parser.add_argument("--max-eval-examples", type=int, default=200,
                         help="Max MATH test examples for validation (keep ≤ 500)")
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.45,
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.85,
                         help="vLLM memory fraction on the eval GPU (cuda:1)")
     parser.add_argument("--output-dir", default="/scratch/mm14444/sft-model")
     parser.add_argument("--seed", type=int, default=42)
