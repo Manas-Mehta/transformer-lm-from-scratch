@@ -163,6 +163,7 @@ def main():
         torch_dtype=torch.bfloat16,
     ).to(policy_device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model.gradient_checkpointing_enable()  # recompute activations during backward to save GPU memory
     model.train()
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
