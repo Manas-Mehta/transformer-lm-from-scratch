@@ -37,6 +37,7 @@ singularity exec --bind /scratch --nv \
     # ── Repo + HPC pyproject ──────────────────────────────────────────────
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
     cp pyproject-hpc.toml pyproject.toml
+    cp uv-hpc.lock uv.lock
 
     echo "============================================"
     echo "  Part 4 — SFT on MATH dataset"
