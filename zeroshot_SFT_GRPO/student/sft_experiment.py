@@ -161,9 +161,9 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",  # saves memory on long sequences (PDF §4.1)
     ).to(policy_device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model.gradient_checkpointing_enable()  # recompute activations during backward to save GPU memory
     model.train()
 
     # ── Optimizer ─────────────────────────────────────────────────────────────

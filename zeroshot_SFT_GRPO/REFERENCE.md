@@ -811,7 +811,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model = AutoModelForCausalLM.from_pretrained(
     "Qwen/Qwen2.5-Math-1.5B",
-    torch_dtype=torch.bfloat16,    # half-precision: 2x memory savings, same quality
+    torch_dtype=torch.bfloat16,                    # half-precision: 2x memory savings
+    attn_implementation="flash_attention_2",        # O(N) attention memory vs O(N²) default
 )
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
 
