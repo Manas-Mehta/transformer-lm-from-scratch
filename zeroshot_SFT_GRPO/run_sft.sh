@@ -32,6 +32,7 @@ singularity exec --bind /scratch --nv \
     export UV_CACHE_DIR=/scratch/mm14444/.cache/uv
     export UV_LINK_MODE=copy
     export HF_HOME=/scratch/mm14444/.cache/huggingface
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     # ── Repo + HPC pyproject ──────────────────────────────────────────────
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
@@ -55,8 +56,8 @@ singularity exec --bind /scratch --nv \
         --model Qwen/Qwen2.5-Math-1.5B \
         --data-path data-distrib/intellect_math/train \
         $N_EXAMPLES_FLAG \
-        --batch-size 2 \
-        --gradient-accumulation-steps 8 \
+        --batch-size 1 \
+        --gradient-accumulation-steps 16 \
         --lr 2e-5 \
         --n-steps 200 \
         --eval-every 50 \
