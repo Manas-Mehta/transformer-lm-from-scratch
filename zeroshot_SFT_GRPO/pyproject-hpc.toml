@@ -28,6 +28,9 @@ include = ["student"]
 [tool.uv]
 package = true
 
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
+
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "WARNING"
