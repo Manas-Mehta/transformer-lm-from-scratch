@@ -1232,51 +1232,344 @@ TBD
 
 ## 5 Countdown
 
-> *This section will be developed when we reach Part 5. Outline below.*
+### 5.1 What Is Countdown? (PDF §5)
 
-### Contents of Part 5
-- The Countdown dataset and prompt format
-- Why it's better than MATH for RL experimentation
+Countdown is a number puzzle: given a list of numbers (e.g., `[96, 97, 68]`) and a target (e.g., `125`), create an arithmetic equation using those numbers (+, -, *, /) where each number is used **at most once**, that equals the target.
 
-### Deliverables
-- None (reading/context section)
+Example answer:
+```
+97 - 68 + 96 = 125
+```
+
+### 5.2 Why Use Countdown for RL Instead of MATH?
+
+| Property | MATH | Countdown |
+|----------|------|-----------|
+| Reward signal | Fuzzy (needs semantic parser) | Exact: equation evaluates to target or it doesn't |
+| Difficulty | Very hard — model barely improves | Easier — RL gains are visible quickly |
+| Speed of training signal | Slow | Fast |
+
+The reward is **verifiable and binary** — you can check an equation's correctness with a Python `eval()`. This makes it ideal for RL with verified rewards.
+
+### 5.3 Prompt Format (PDF §5, verbatim)
+
+The prompt is in `student/prompts/countdown.prompt`. It instructs the model to:
+1. Reason step by step
+2. Format answer as `<answer>...(steps or equation)...</answer>`
+
+Ground truth for grading is just the target number — we evaluate whether the model's equation evaluates to it.
+
+### 5.4 Dataset Split (PDF §5)
+
+| Split | Size | Use |
+|-------|------|-----|
+| train | 10k | GRPO training |
+| dev | 1024 | Validation during training |
+| test | 1024 | Final evaluation |
+
+### 5.5 Deliverables
+
+None — this section is purely context. Countdown is used in §7 (GRPO) and §8 (Experiments).
 
 ---
 
 ## 6 Primer on Policy Gradients
 
-> *This section will be developed when we reach Part 6. Outline below.*
+### 6.1 Language Models as Policies (PDF §6.1)
 
-### Contents of Part 6
-- **6.1 Language Models as Policies** — The RL framing of LMs
-- **6.2 Trajectories** — Episodes, rollouts, state/action sequences
-- **6.3 Rewards and Return** — Verified rewards, undiscounted returns
-- **6.4 Vanilla Policy Gradient** — REINFORCE algorithm, derivation
-- **6.5 Policy Gradient Baselines** — Variance reduction, baseline subtraction
+A causal LM with parameters θ defines a probability over the next token given the current prefix. In RL terms:
 
-### Deliverables
-- Primarily theory understanding (written questions in writeup)
+- **State** s_t = the text prefix so far
+- **Action** a_t = the next token chosen
+- **Policy** π_θ(a_t | s_t) = softmax(f_θ(s_t))[a_t]   (PDF Eq. 3)
+
+Two operations are needed:
+1. **Sampling**: draw a_t ~ π_θ(·|s_t) — done by vLLM
+2. **Scoring**: compute log π_θ(a_t|s_t) — done by `get_response_log_probs` (already implemented)
+
+### 6.2 Trajectories (PDF §6.2)
+
+A trajectory τ = (s_0, a_0, s_1, a_1, ..., s_T, a_T) is the full token sequence of one rollout. Because the LM environment is deterministic (next state = prefix + token), trajectories are just the generated text. Also called **episodes** or **rollouts**.
+
+### 6.3 Rewards and Return (PDF §6.3)
+
+For verified RL on Countdown:
+- Intermediate rewards = 0
+- Terminal reward r_T = 1 if the answer is correct, 0 otherwise
+
+Return R(τ) = sum of rewards = r_T (since all intermediate rewards are 0). We use **undiscounted** returns because episodes have a natural endpoint (EOS token or max length).
+
+### 6.4 Vanilla Policy Gradient — REINFORCE (PDF §6.4)
+
+The objective is to maximize J(θ) = E[R(τ)].
+
+The REINFORCE policy gradient identity (PDF Eq. 10):
+
+```
+∇_θ J(π_θ) = E_τ [ Σ_t ∇_θ log π_θ(a_t|s_t) · R(τ) ]
+```
+
+In PyTorch terms, we define a **loss** whose `.backward()` computes this gradient:
+
+```
+pg_loss = -1/N Σ_i Σ_t log π_θ(a_t^(i)|s_t^(i)) · R(τ^(i))
+```
+
+Calling `pg_loss.backward()` populates the gradients with the approximate policy gradient.
+
+**Key point:** pg_loss is not a meaningful evaluation metric. Always report the **reward** as the metric.
+
+### 6.5 Policy Gradient Baselines (PDF §6.5)
+
+Problem with REINFORCE: high variance. The fix is to subtract a **baseline** b(s_t) from the reward:
+
+```
+B = E_τ [ Σ_t ∇_θ log π_θ(a_t|s_t) · (R(τ) - b(s_t)) ]
+```
+
+This is unbiased (the baseline term has zero expectation because the score function has zero expectation). The baseline reduces variance without introducing bias.
+
+GRPO's approach: use the **group mean** as the baseline (computed from G rollouts on the same question).
+
+### 6.6 Deliverables
+
+Primarily theory understanding for the writeup. No code in this section.
 
 ---
 
 ## 7 Group Relative Policy Optimization
 
-> *This section will be developed when we reach Part 7. Outline below.*
+### 7.1 The GRPO Idea (PDF §7.1)
 
-### Contents of Part 7
-- **7.1 GRPO Algorithm** — Advantage estimation, the full algorithm, GRPO-Clip objective
-- **7.2 Implementation** — All the helper functions + the train loop
+GRPO avoids learning a separate value function V_φ(s) (which is expensive). Instead, it uses the **group mean** as the baseline: for each question, sample G responses, use their mean reward as the baseline.
 
-### Deliverables
-| Problem | Points | Type |
-|---------|--------|------|
-| `compute_group_normalized_rewards` | 4 | Code + test |
-| `compute_naive_policy_gradient_loss` | 4 | Code + test |
-| `compute_grpo_clip_loss` | 4 | Code + test |
-| `compute_policy_gradient_loss` | 4 | Code + test |
-| `masked_mean` | 2 | Code + test |
-| `grpo_microbatch_train_step` | 8 | Code + test |
-| `grpo_train_loop` | 15 | Code + runs + writeup |
+**Standard GRPO advantage** (PDF Eq. 27):
+```
+A^(i) = (r^(i) - mean(r^(1),...,r^(G))) / (std(r^(1),...,r^(G)) + advantage_eps)
+```
+
+**Dr. GRPO simplified** (PDF Eq. 30 — remove std normalization):
+```
+A^(i) = r^(i) - mean(r^(1),...,r^(G))
+```
+
+The advantage A^(i) is the same for every token in response i (it's a per-response scalar).
+
+### 7.2 The GRPO Algorithm (PDF §7.1, Algorithm 2)
+
+```
+for step = 1, ..., n_grpo_steps:
+    Sample batch of questions D_b
+    Set old policy π_θ_old ← π_θ
+    Sample G outputs per question from π_θ_old
+    Compute rewards r^(i) for each output
+    Compute advantages A^(i) via group normalization (Eq. 27 or 30)
+    for train_step = 1, ..., n_train_steps_per_rollout_batch:
+        Update π_θ by maximizing GRPO-Clip objective (Eq. 28)
+```
+
+### 7.3 The GRPO-Clip Objective (PDF §7.1, Eq. 28 and 32)
+
+The per-token GRPO-Clip loss is:
+
+```
+-min(ratio · A^(i), clip(ratio, 1-ε, 1+ε) · A^(i))
+```
+
+where `ratio = π_θ(o_t|q, o_{<t}) / π_θ_old(o_t|q, o_{<t}) = exp(log_π_θ - log_π_θ_old)`.
+
+Why clip? To prevent the policy from changing too much from π_θ_old in a single update — stability.
+
+---
+
+### 7.4 Implementation: `compute_group_normalized_rewards` (PDF §7.2)
+
+**Theory:** For each group of G responses to the same question, compute the raw reward for each, then normalize within the group.
+
+**PDF cite:** §7.2, Eq. 27 (`normalize_by_std=True`) and Eq. 30 (`normalize_by_std=False`)
+
+**Code Structure Sketch:**
+```python
+def compute_group_normalized_rewards(reward_fn, rollout_responses, repeated_ground_truths,
+                                      group_size, advantage_eps, normalize_by_std):
+    # 1. Compute raw reward for each response
+    raw_rewards = tensor([reward_fn(r, g)["reward"] for each (r, g)])
+
+    # 2. For each group of group_size responses:
+    for each group:
+        group_mean = mean(group_rewards)
+        if normalize_by_std:
+            advantages[group] = (group_rewards - group_mean) / (std + advantage_eps)  # Eq. 27
+        else:
+            advantages[group] = group_rewards - group_mean                             # Eq. 30
+
+    # 3. Return (advantages, raw_rewards, metadata)
+```
+
+**Actual Code (`student/grpo.py`):**
+```python
+def compute_group_normalized_rewards(reward_fn, rollout_responses, repeated_ground_truths,
+                                      group_size, advantage_eps, normalize_by_std):
+    n = len(rollout_responses)
+    raw_rewards = torch.tensor(
+        [reward_fn(r, g)["reward"] for r, g in zip(rollout_responses, repeated_ground_truths)],
+        dtype=torch.float32,
+    )
+    advantages = torch.zeros_like(raw_rewards)
+    for i in range(n // group_size):
+        start, end = i * group_size, (i + 1) * group_size
+        group = raw_rewards[start:end]
+        group_mean = group.mean()
+        if normalize_by_std:
+            advantages[start:end] = (group - group_mean) / (group.std() + advantage_eps)
+        else:
+            advantages[start:end] = group - group_mean
+    metadata = {"mean_reward": raw_rewards.mean().item(), "std_reward": raw_rewards.std().item(),
+                "max_reward": raw_rewards.max().item(), "min_reward": raw_rewards.min().item()}
+    return advantages, raw_rewards, metadata
+```
+
+**Test:** `uv run pytest -k test_compute_group_normalized_rewards`
+
+---
+
+### 7.5 Implementation: `masked_mean` (PDF §7.2, used in GRPO train step)
+
+**Theory:** Average a tensor over the elements where mask=1. Used to average per-token losses over response tokens only.
+
+**PDF cite:** §7.2 — implicitly needed to aggregate the per-token GRPO loss over response tokens.
+
+**Code Structure Sketch:**
+```python
+def masked_mean(tensor, mask, dim=None):
+    # Sum(tensor * mask) / Count(mask == 1)
+    # If dim is None: scalar mean over all masked elements
+    # Otherwise: mean along the specified dimension
+```
+
+**Actual Code (`student/grpo.py`):**
+```python
+def masked_mean(tensor, mask, dim=None):
+    mask = mask.float()
+    if dim is None:
+        return (tensor * mask).sum() / mask.sum()
+    else:
+        return (tensor * mask).sum(dim=dim) / mask.sum(dim=dim)
+```
+
+**Test:** `uv run pytest -k test_masked_mean`
+
+---
+
+### 7.6 Implementation: `compute_naive_policy_gradient_loss` (PDF §7.2, Eq. 31)
+
+**Theory:** The naive REINFORCE per-token loss. For each token, multiply the (negative) advantage by the log-probability of that token.
+
+**PDF cite:** §7.2, Eq. 31: `-A_t · log π_θ(o_t|q, o_{<t})`
+
+**Code Structure Sketch:**
+```python
+def compute_naive_policy_gradient_loss(raw_rewards_or_advantages, policy_log_probs):
+    # raw_rewards_or_advantages: (batch_size, 1) — same advantage for all tokens in a response
+    # policy_log_probs: (batch_size, seq_len)
+    # Broadcast the scalar advantage over the sequence dimension
+    return -raw_rewards_or_advantages * policy_log_probs  # (batch_size, seq_len)
+```
+
+**Actual Code (`student/grpo.py`):**
+```python
+def compute_naive_policy_gradient_loss(raw_rewards_or_advantages, policy_log_probs):
+    return -raw_rewards_or_advantages * policy_log_probs
+```
+
+**Test:** `uv run pytest -k test_compute_naive_policy_gradient_loss`
+
+---
+
+### 7.7 Implementation: `compute_grpo_clip_loss` (PDF §7.2, Eq. 32)
+
+**Theory:** The GRPO-Clip per-token loss. Compute the probability ratio π_θ/π_θ_old, clip it to [1-ε, 1+ε], then take the min of clipped and unclipped objective. This prevents the policy from going too far from the old policy.
+
+**PDF cite:** §7.2, Eq. 32: `-min(ratio · A, clip(ratio, 1-ε, 1+ε) · A)`
+
+**Code Structure Sketch:**
+```python
+def compute_grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange):
+    # ratio = exp(log π_θ - log π_θ_old)
+    ratio = exp(policy_log_probs - old_log_probs)
+    clipped_ratio = clamp(ratio, 1 - cliprange, 1 + cliprange)
+    # Per-token loss: -min(ratio * A, clipped_ratio * A)
+    loss = -min(ratio * advantages, clipped_ratio * advantages)
+    return loss, metadata
+```
+
+**Actual Code (`student/grpo.py`):**
+```python
+def compute_grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange):
+    log_ratio = policy_log_probs - old_log_probs
+    ratio = torch.exp(log_ratio)
+    clipped_ratio = torch.clamp(ratio, 1 - cliprange, 1 + cliprange)
+    loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+    clip_fraction = (ratio != clipped_ratio).float().mean()
+    return loss, {"clip_fraction": clip_fraction}
+```
+
+**Test:** `uv run pytest -k test_compute_grpo_clip_loss`
+
+---
+
+### 7.8 Implementation: `compute_policy_gradient_loss` (PDF §7.2 — wrapper)
+
+**Theory:** Wrapper that dispatches to the right loss function based on `loss_type`. Three modes:
+- `"no_baseline"`: REINFORCE with raw rewards (no baseline subtraction)
+- `"reinforce_with_baseline"`: REINFORCE with group-normalized advantages
+- `"grpo_clip"`: GRPO-Clip with advantages and old policy log-probs
+
+**Code Structure Sketch:**
+```python
+def compute_policy_gradient_loss(policy_log_probs, loss_type, raw_rewards, advantages, old_log_probs, cliprange):
+    if loss_type == "no_baseline":      return naive_pg_loss(raw_rewards, policy_log_probs), {}
+    elif loss_type == "reinforce_with_baseline": return naive_pg_loss(advantages, policy_log_probs), {}
+    elif loss_type == "grpo_clip":      return grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange)
+```
+
+**Actual Code:** See `student/grpo.py`.
+
+**Test:** `uv run pytest -k test_compute_policy_gradient_loss`
+
+---
+
+### 7.9 Implementation: `grpo_microbatch_train_step` (PDF §7.2 — train loop step)
+
+**Theory:** One microbatch step of GRPO. Same structure as SFT microbatch step but using a policy-gradient loss instead of cross-entropy. Average per-token losses over response tokens with `masked_mean`, divide by gradient accumulation steps, call backward.
+
+**Code Structure Sketch:**
+```python
+def grpo_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps,
+                                loss_type, raw_rewards, advantages, old_log_probs, cliprange):
+    per_token_loss, metadata = compute_policy_gradient_loss(...)
+    loss = masked_mean(per_token_loss, response_mask) / gradient_accumulation_steps
+    loss.backward()
+    return loss, metadata
+```
+
+**Actual Code:** See `student/grpo.py`.
+
+**Test:** `uv run pytest -k test_grpo_microbatch_train_step`
+
+---
+
+### 7.10 Deliverables Summary
+
+| Problem | Points | Status | Test command |
+|---------|--------|--------|--------------|
+| `compute_group_normalized_rewards` | 4 | ⬜ | `pytest -k test_compute_group_normalized_rewards` |
+| `compute_naive_policy_gradient_loss` | 4 | ⬜ | `pytest -k test_compute_naive_policy_gradient_loss` |
+| `compute_grpo_clip_loss` | 4 | ⬜ | `pytest -k test_compute_grpo_clip_loss` |
+| `compute_policy_gradient_loss` | 4 | ⬜ | `pytest -k test_compute_policy_gradient_loss` |
+| `masked_mean` | 2 | ⬜ | `pytest -k test_masked_mean` |
+| `grpo_microbatch_train_step` | 8 | ⬜ | `pytest -k test_grpo_microbatch_train_step` |
+| `grpo_train_loop` | 15 | ⬜ | Runs on HPC |
 
 ---
 
