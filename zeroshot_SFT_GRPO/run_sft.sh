@@ -34,6 +34,9 @@ singularity exec --bind /scratch --nv \
     export HF_HOME=/scratch/mm14444/.cache/huggingface
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+    # ── CUDA build environment (needed to compile flash-attn from source) ──
+    export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
+
     # ── Repo + HPC pyproject ──────────────────────────────────────────────
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
     cp pyproject-hpc.toml pyproject.toml
