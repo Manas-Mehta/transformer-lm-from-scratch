@@ -161,7 +161,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",  # saves memory on long sequences (PDF §4.1)
+        attn_implementation="sdpa",  # flash_attn unavailable in container; sdpa is equivalent on A100
     ).to(policy_device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model.train()
