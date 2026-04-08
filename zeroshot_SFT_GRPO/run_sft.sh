@@ -42,7 +42,7 @@ singularity exec --bind /scratch --nv \
     # pip dep of vllm. Must be installed separately on GPU nodes.
     if ! .venv/bin/python -c "import flash_attn" 2>/dev/null; then
         echo "Installing flash-attn..."
-        .venv/bin/python -m pip install flash-attn --no-build-isolation -q
+        uv pip install flash-attn --no-build-isolation -q
     fi
 
     echo "============================================"
