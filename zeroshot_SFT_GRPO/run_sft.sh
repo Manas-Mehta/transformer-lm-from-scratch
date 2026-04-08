@@ -34,13 +34,10 @@ singularity exec --bind /scratch --nv \
     export HF_HOME=/scratch/mm14444/.cache/huggingface
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-    # ── CUDA build environment (needed to compile flash-attn from source) ──
-    export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
-
-    # ── Repo + HPC pyproject ──────────────────────────────────────────────
+    # ── Repo ──────────────────────────────────────────────────────────────
+    # All deps are pre-installed in .venv. Skip uv sync (avoids flash-attn
+    # build failure). Python finds the student package from cwd.
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
-    cp pyproject-hpc.toml pyproject.toml
-    cp uv-hpc.lock uv.lock
 
     echo "============================================"
     echo "  Part 4 — SFT on MATH dataset"
@@ -55,7 +52,7 @@ singularity exec --bind /scratch --nv \
         N_EXAMPLES_FLAG="--n-examples '"${N_EXAMPLES}"'"
     fi
 
-    uv run python -m student.sft_experiment \
+    .venv/bin/python -m student.sft_experiment \
         --model Qwen/Qwen2.5-Math-1.5B \
         --data-path data-distrib/intellect_math/train \
         $N_EXAMPLES_FLAG \
