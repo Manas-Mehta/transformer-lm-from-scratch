@@ -35,9 +35,15 @@ singularity exec --bind /scratch --nv \
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     # ── Repo ──────────────────────────────────────────────────────────────
-    # All deps are pre-installed in .venv. Skip uv sync (avoids flash-attn
-    # build failure). Python finds the student package from cwd.
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
+
+    # ── Install flash-attn if not already present ──────────────────────────
+    # Not in uv.lock (lock was generated on Mac without CUDA) and not a
+    # pip dep of vllm. Must be installed separately on GPU nodes.
+    if ! .venv/bin/python -c "import flash_attn" 2>/dev/null; then
+        echo "Installing flash-attn..."
+        .venv/bin/pip install flash-attn --no-build-isolation -q
+    fi
 
     echo "============================================"
     echo "  Part 4 — SFT on MATH dataset"
