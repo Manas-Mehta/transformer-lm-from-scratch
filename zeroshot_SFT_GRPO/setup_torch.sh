@@ -5,7 +5,7 @@
 #
 # Prerequisites: conda available (base env), internet access, /scratch writable
 # ============================================================================
-set -euo pipefail
+set -eo pipefail
 
 NETID="mm14444"
 SCRATCH="/scratch/${NETID}"
