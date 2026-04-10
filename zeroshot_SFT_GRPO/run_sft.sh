@@ -34,16 +34,15 @@ singularity exec --bind /scratch --nv \
     export HF_HOME=/scratch/mm14444/.cache/huggingface
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-    # ── Repo ──────────────────────────────────────────────────────────────
+    # ── Repo + HPC pyproject ─────────────────────────────────────────────
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
+    cp pyproject-hpc.toml pyproject.toml
 
-    # ── Install flash-attn if not already present ──────────────────────────
-    # Not in uv.lock (lock was generated on Mac without CUDA) and not a
-    # pip dep of vllm. Must be installed separately on GPU nodes.
-    if ! .venv/bin/python -c "import flash_attn" 2>/dev/null; then
-        echo "Installing flash-attn..."
-        uv pip install flash-attn --no-build-isolation -q
-    fi
+    # The uv-hpc.lock was generated from the Stanford upstream pyproject
+    # and contains flash-attn (sdist that cannot compile here).
+    # Delete any stale lock so uv resolves fresh from pyproject-hpc.toml
+    # which correctly excludes flash-attn.
+    rm -f uv.lock
 
     echo "============================================"
     echo "  Part 4 — SFT on MATH dataset"
@@ -58,7 +57,7 @@ singularity exec --bind /scratch --nv \
         N_EXAMPLES_FLAG="--n-examples '"${N_EXAMPLES}"'"
     fi
 
-    .venv/bin/python -m student.sft_experiment \
+    uv run python -m student.sft_experiment \
         --model Qwen/Qwen2.5-Math-1.5B \
         --data-path data-distrib/intellect_math/train \
         $N_EXAMPLES_FLAG \
