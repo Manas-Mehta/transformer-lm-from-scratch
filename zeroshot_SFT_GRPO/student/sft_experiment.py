@@ -169,6 +169,12 @@ def main():
     ).to(policy_device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model.train()
+    # Enable gradient checkpointing: recomputes activations during backward
+    # instead of storing them, cutting activation memory ~60-70%. Required
+    # because MATH CoT sequences can be 8k+ tokens. use_cache must be off
+    # (HF requirement when checkpointing is on).
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
