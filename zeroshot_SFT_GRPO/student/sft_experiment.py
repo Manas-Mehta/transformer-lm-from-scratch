@@ -121,7 +121,9 @@ def main():
     parser.add_argument("--max-eval-examples", type=int, default=200,
                         help="Max MATH test examples for validation (keep ≤ 500)")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85,
-                        help="vLLM memory fraction on the eval GPU (cuda:1)")
+                        help="vLLM memory fraction on the eval GPU")
+    parser.add_argument("--single-gpu", action="store_true",
+                        help="Put both policy and vLLM on cuda:0 (for high-memory GPUs)")
     parser.add_argument("--output-dir", default="/scratch/mm14444/sft-model")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb-project", default="nyu-llm-reasoners-a3")
@@ -134,7 +136,10 @@ def main():
     random.seed(args.seed)
 
     policy_device = "cuda:0"
-    vllm_device = "cuda:1"
+    vllm_device = "cuda:0" if args.single_gpu else "cuda:1"
+    if args.single_gpu and args.gpu_memory_utilization > 0.45:
+        args.gpu_memory_utilization = 0.4
+        print(f"  Single-GPU mode: reducing vLLM gpu_memory_utilization to {args.gpu_memory_utilization}")
 
     # ── WandB ─────────────────────────────────────────────────────────────────
     run_name = args.wandb_name or f"sft-n{args.n_examples or 'full'}-lr{args.lr}"
