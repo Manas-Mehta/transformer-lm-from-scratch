@@ -37,12 +37,7 @@ singularity exec --bind /scratch --nv \
     # ── Repo + HPC pyproject ─────────────────────────────────────────────
     cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
     cp pyproject-hpc.toml pyproject.toml
-
-    # The uv-hpc.lock was generated from the Stanford upstream pyproject
-    # and contains flash-attn (sdist that cannot compile here).
-    # Delete any stale lock so uv resolves fresh from pyproject-hpc.toml
-    # which correctly excludes flash-attn.
-    rm -f uv.lock
+    # uv.lock is now persisted — uv run reuses the existing .venv in seconds.
 
     echo "============================================"
     echo "  Part 4 — SFT on MATH dataset"
