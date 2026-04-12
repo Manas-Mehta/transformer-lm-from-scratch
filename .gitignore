@@ -39,6 +39,9 @@ runs/
 uv.lock
 uv-mac.lock
 
+# Personal reference notes
+REFERENCE.md
+
 # Assignment PDFs (already committed separately if needed)
 # Uncomment to also ignore:
 # *.pdf
