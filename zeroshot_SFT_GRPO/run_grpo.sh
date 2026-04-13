@@ -13,7 +13,7 @@
 #   sbatch run_grpo.sh                                    # defaults: lr=1e-5, reinforce_with_baseline
 #   sbatch run_grpo.sh 5e-6                               # custom lr
 #   sbatch run_grpo.sh 1e-5 no_baseline                   # custom loss type
-#   sbatch run_grpo.sh 1e-5 reinforce_with_baseline --use-std-normalization False
+#   sbatch run_grpo.sh 1e-5 reinforce_with_baseline --no-use-std-normalization
 
 mkdir -p logs
 
@@ -32,6 +32,7 @@ set -eo pipefail
 export UV_CACHE_DIR=/scratch/mm14444/.cache/uv
 export UV_LINK_MODE=copy
 export HF_HOME=/scratch/mm14444/.cache/huggingface
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ── Repo + HPC pyproject ──────────────────────────────────────────────
 cd /scratch/mm14444/transformer-lm-from-scratch/zeroshot_SFT_GRPO
@@ -58,6 +59,7 @@ uv run python -m student.grpo_experiment \\
     --gpu-memory-utilization 0.8 \\
     --output-dir /scratch/mm14444/grpo-model-lr\${LR}-\${LOSS_TYPE} \\
     --wandb-name grpo-lr\${LR}-\${LOSS_TYPE} \\
+    --wandb-mode disabled \\
     $@
 
 echo "============================================"

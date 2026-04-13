@@ -209,7 +209,7 @@ def main():
                         help="Clip parameter epsilon for grpo_clip loss")
     parser.add_argument("--loss-type", default="reinforce_with_baseline",
                         choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"])
-    parser.add_argument("--use-std-normalization", type=bool, default=True)
+    parser.add_argument("--use-std-normalization", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     # Eval
     parser.add_argument("--eval-every", type=int, default=10)
