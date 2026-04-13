@@ -57,8 +57,8 @@ uv run python -m student.grpo_experiment \\
     --eval-every 10 \\
     --n-eval-examples 200 \\
     --gpu-memory-utilization 0.8 \\
-    --output-dir /scratch/mm14444/grpo-model-lr\${LR}-\${LOSS_TYPE} \\
-    --wandb-name grpo-lr\${LR}-\${LOSS_TYPE} \\
+    --output-dir /scratch/mm14444/grpo-model-lr${LR}-${LOSS_TYPE} \\
+    --wandb-name grpo-lr${LR}-${LOSS_TYPE} \\
     --wandb-mode disabled \\
     $@
 

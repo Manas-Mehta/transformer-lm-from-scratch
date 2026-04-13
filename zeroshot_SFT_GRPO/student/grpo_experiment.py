@@ -27,10 +27,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from student.grpo import (
     compute_group_normalized_rewards,
+    compute_policy_gradient_loss,
     grpo_microbatch_train_step,
 )
 from student.sft import (
     get_response_log_probs,
+    masked_normalize,
     tokenize_prompt_and_output,
 )
 
@@ -210,6 +212,9 @@ def main():
     parser.add_argument("--loss-type", default="reinforce_with_baseline",
                         choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"])
     parser.add_argument("--use-std-normalization", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--length-normalization", default="masked_mean",
+                        choices=["masked_mean", "masked_normalize"],
+                        help="How to aggregate per-token loss over sequence length")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     # Eval
     parser.add_argument("--eval-every", type=int, default=10)
@@ -415,16 +420,33 @@ def main():
                         mb_old_lps = mb_old_lps[:, :seq_len]
 
                 # GRPO microbatch train step
-                loss, meta = grpo_microbatch_train_step(
-                    policy_log_probs=policy_log_probs,
-                    response_mask=response_mask,
-                    gradient_accumulation_steps=args.gradient_accumulation_steps,
-                    loss_type=args.loss_type,
-                    raw_rewards=mb_raw_rewards if args.loss_type == "no_baseline" else None,
-                    advantages=mb_advantages if args.loss_type != "no_baseline" else None,
-                    old_log_probs=mb_old_lps,
-                    cliprange=args.cliprange if args.loss_type == "grpo_clip" else None,
-                )
+                if args.length_normalization == "masked_mean":
+                    # Default: use grpo_microbatch_train_step (uses masked_mean)
+                    loss, meta = grpo_microbatch_train_step(
+                        policy_log_probs=policy_log_probs,
+                        response_mask=response_mask,
+                        gradient_accumulation_steps=args.gradient_accumulation_steps,
+                        loss_type=args.loss_type,
+                        raw_rewards=mb_raw_rewards if args.loss_type == "no_baseline" else None,
+                        advantages=mb_advantages if args.loss_type != "no_baseline" else None,
+                        old_log_probs=mb_old_lps,
+                        cliprange=args.cliprange if args.loss_type == "grpo_clip" else None,
+                    )
+                else:
+                    # masked_normalize: sum over tokens, divide by max_tokens constant
+                    per_token_loss, meta = compute_policy_gradient_loss(
+                        policy_log_probs=policy_log_probs,
+                        loss_type=args.loss_type,
+                        raw_rewards=mb_raw_rewards if args.loss_type == "no_baseline" else None,
+                        advantages=mb_advantages if args.loss_type != "no_baseline" else None,
+                        old_log_probs=mb_old_lps,
+                        cliprange=args.cliprange if args.loss_type == "grpo_clip" else None,
+                    )
+                    loss = masked_normalize(
+                        per_token_loss, response_mask, dim=1,
+                        normalize_constant=args.sampling_max_tokens,
+                    ).mean() / args.gradient_accumulation_steps
+                    loss.backward()
 
                 total_loss += loss.item()
                 n_microbatches += 1
