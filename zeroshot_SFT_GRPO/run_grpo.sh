@@ -13,13 +13,17 @@
 #   sbatch run_grpo.sh                                    # defaults: lr=1e-5, reinforce_with_baseline
 #   sbatch run_grpo.sh 5e-6                               # custom lr
 #   sbatch run_grpo.sh 1e-5 no_baseline                   # custom loss type
-#   sbatch run_grpo.sh 1e-5 reinforce_with_baseline --no-use-std-normalization
+#   For ablation runs that share LR+LOSS_TYPE, override names to avoid collisions:
+#   sbatch run_grpo.sh 1e-5 reinforce_with_baseline --no-use-std-normalization \
+#       --wandb-name grpo-nostdnorm --output-dir /scratch/mm14444/grpo-model-nostdnorm
 
 mkdir -p logs
 
 LR="${1:-1e-5}"
 LOSS_TYPE="${2:-reinforce_with_baseline}"
-shift 2 2>/dev/null || true  # remaining args passed through
+# Shift past positional args safely (handles 0, 1, or 2+ args)
+[ $# -ge 1 ] && shift
+[ $# -ge 1 ] && shift
 
 INNER_SCRIPT=$(mktemp /scratch/mm14444/tmp/grpo_inner_XXXX.sh)
 cat > "${INNER_SCRIPT}" <<INNEREOF
