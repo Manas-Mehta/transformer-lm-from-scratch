@@ -1,0 +1,25 @@
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model outputs (too large for git; belong on HPC / Drive)
+out/
+out_augmented/
+*.bin
+*.safetensors
+
+# Eval result files (submit via Gradescope, don't commit)
+out_*.txt
+
+# SLURM logs
+slurm/logs/
+
+# HF cache
+.cache/
