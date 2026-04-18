@@ -27,18 +27,25 @@ bash slurm/setup_env.sh
 ```bash
 cd /scratch/mm14444/transformer-lm-from-scratch/bert-imdb-ood-finetuning
 
-# Q1: train + eval original (~25 min on H200)
+# Q0: PDF-required debug sanity check on 4k-sample subset (~8 min).
+# Gate: accuracy must be >= 88% before proceeding to Q1. Writes out_original.txt
+# from the debug model — this gets overwritten by Q1 below, which is fine.
+sbatch slurm/q0_debug_train.sbatch
+
+# Q1: full train + eval on original (~25 min on H200). Target: >= 91%.
 sbatch slurm/q1_train_eval.sbatch
 
-# Q2: eval Q1 model on transformed test (~3 min)
+# Q2: eval Q1 model on transformed test (~3 min). Target: drop > 4pt vs Q1.
 sbatch slurm/q2_eval_transformed.sbatch
 
-# Q3a: train augmented + eval transformed (~30 min)
+# Q3a: train augmented + eval transformed (~30 min).
 sbatch slurm/q3_train_augmented.sbatch
 
-# Q3b: eval augmented model on original test (~3 min)
+# Q3b: eval augmented model on original test (~3 min).
 sbatch slurm/q3_eval_augmented_original.sbatch
 ```
+
+Run each job sequentially (wait for the previous to finish) — Q1 needs Q0 to pass, Q2 needs Q1's `./out/` model, and Q3b needs Q3a's `./out_augmented/`.
 
 Each sbatch uses:
 - `--account=torch_pr_219_courant`, `--partition=h200_courant`
@@ -93,6 +100,7 @@ bert-imdb-ood-finetuning/
 ├── out_augmented_transformed.txt # Q3 submission
 ├── slurm/
 │   ├── setup_env.sh              # one-time login-node setup
+│   ├── q0_debug_train.sbatch     # PDF-required sanity check
 │   ├── q1_train_eval.sbatch
 │   ├── q2_eval_transformed.sbatch
 │   ├── q3_train_augmented.sbatch
