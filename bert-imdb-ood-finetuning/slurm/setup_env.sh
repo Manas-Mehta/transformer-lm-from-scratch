@@ -7,7 +7,7 @@
 # Usage:  bash slurm/setup_env.sh
 # ============================================================================
 
-set -euo pipefail
+set -eo pipefail
 
 NETID="mm14444"
 SCRATCH="/scratch/${NETID}"
