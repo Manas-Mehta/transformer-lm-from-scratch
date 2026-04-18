@@ -14,6 +14,12 @@ SCRATCH="/scratch/${NETID}"
 PROJECT_DIR="${SCRATCH}/transformer-lm-from-scratch/bert-imdb-ood-finetuning"
 ENV_DIR="${SCRATCH}/conda_envs/nlp_hw4"
 
+# Redirect pip cache and tmp to scratch. $HOME and /tmp have small quotas on
+# this cluster; torch 2.x pulls ~2.5GB of CUDA wheels and blows them out.
+export PIP_CACHE_DIR="${SCRATCH}/pip_cache"
+export TMPDIR="${SCRATCH}/tmp"
+mkdir -p "${PIP_CACHE_DIR}" "${TMPDIR}"
+
 echo "=== Step 1/4: create conda env at ${ENV_DIR} ==="
 eval "$(conda shell.bash hook)"
 if [ ! -d "${ENV_DIR}" ]; then
