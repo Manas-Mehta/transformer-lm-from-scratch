@@ -1,0 +1,9 @@
+checkpoints/
+slurm/logs/
+results/*.sql
+records/*.pkl
+!records/ground_truth_dev.pkl
+__pycache__/
+*.pyc
+.venv/
+wandb/
