@@ -65,6 +65,8 @@ def get_args():
     # Skip training and only run inference (for reusing a trained checkpoint on test).
     parser.add_argument('--skip_train', action='store_true',
                         help="Load existing best checkpoint and only run dev + test eval.")
+    parser.add_argument('--resume_best', action='store_true',
+                        help="Warm-start training from existing best checkpoint instead of pretrained.")
 
     # Champion-run knobs.
     parser.add_argument('--use_schema_prompt', action='store_true',
@@ -288,7 +290,10 @@ def main():
     if args.skip_train:
         model = load_model_from_checkpoint(args, best=True)
     else:
-        model = initialize_model(args)
+        if args.resume_best:
+            model = load_model_from_checkpoint(args, best=True)
+        else:
+            model = initialize_model(args)
         optimizer, scheduler = initialize_optimizer_and_scheduler(args, model, len(train_loader))
         train(args, model, train_loader, dev_loader, optimizer, scheduler)
         model = load_model_from_checkpoint(args, best=True)
