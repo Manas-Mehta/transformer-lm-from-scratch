@@ -77,6 +77,9 @@ def get_args():
                         help="Max grad norm. 0.0 disables clipping.")
     parser.add_argument('--num_workers', type=int, default=4,
                         help="DataLoader workers. Keep >0 to avoid GPU starvation on HPC.")
+    parser.add_argument('--normalize_whitespace', action='store_true',
+                        help="Collapse whitespace runs in NL and SQL to single spaces. "
+                             "Matches T5's SentencePiece detokenizer canonical form.")
 
     args = parser.parse_args()
     return args
@@ -279,6 +282,7 @@ def main():
     train_loader, dev_loader, test_loader = load_t5_data(
         args.batch_size, args.test_batch_size,
         use_schema=args.use_schema_prompt, num_workers=args.num_workers,
+        normalize_whitespace=args.normalize_whitespace,
     )
 
     if args.skip_train:

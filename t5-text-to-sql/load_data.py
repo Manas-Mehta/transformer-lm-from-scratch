@@ -46,11 +46,18 @@ def build_compact_schema(data_folder="data"):
     return _COMPACT_SCHEMA
 
 
+def _normalize_ws(s):
+    # Collapse all runs of whitespace to a single space. Matches the canonical
+    # form produced by T5's SentencePiece detokenizer.
+    return " ".join(s.split())
+
+
 class T5Dataset(Dataset):
 
-    def __init__(self, data_folder, split, use_schema=False):
+    def __init__(self, data_folder, split, use_schema=False, normalize_whitespace=False):
         self.split = split
         self.use_schema = use_schema
+        self.normalize_whitespace = normalize_whitespace
         self.tokenizer = get_tokenizer()
         # T5 uses pad_token_id (0) as the decoder_start_token_id. This is the "BOS".
         self.bos_id = self.tokenizer.pad_token_id
@@ -60,6 +67,8 @@ class T5Dataset(Dataset):
         nl_path = os.path.join(data_folder, f"{split}.nl")
         with open(nl_path) as f:
             nl_lines = [line.strip() for line in f]
+        if self.normalize_whitespace:
+            nl_lines = [_normalize_ws(s) for s in nl_lines]
 
         if self.use_schema:
             schema = build_compact_schema(data_folder)
@@ -79,6 +88,8 @@ class T5Dataset(Dataset):
         sql_path = os.path.join(data_folder, f"{split}.sql")
         with open(sql_path) as f:
             sql_lines = [line.strip() for line in f]
+        if self.normalize_whitespace:
+            sql_lines = [_normalize_ws(s) for s in sql_lines]
 
         dec = tokenizer(sql_lines, max_length=MAX_TGT_LEN, truncation=True)
         # Each target already ends with </s> (T5 tokenizer appends EOS by default).
@@ -136,9 +147,10 @@ def test_collate_fn(batch):
     return encoder_ids, encoder_mask, initial_decoder_inputs
 
 
-def get_dataloader(batch_size, split, use_schema=False, num_workers=4):
+def get_dataloader(batch_size, split, use_schema=False, num_workers=4, normalize_whitespace=False):
     data_folder = 'data'
-    dset = T5Dataset(data_folder, split, use_schema=use_schema)
+    dset = T5Dataset(data_folder, split, use_schema=use_schema,
+                     normalize_whitespace=normalize_whitespace)
     shuffle = split == "train"
     collate_fn = normal_collate_fn if split != "test" else test_collate_fn
     dataloader = DataLoader(
@@ -149,10 +161,13 @@ def get_dataloader(batch_size, split, use_schema=False, num_workers=4):
     return dataloader
 
 
-def load_t5_data(batch_size, test_batch_size, use_schema=False, num_workers=4):
-    train_loader = get_dataloader(batch_size, "train", use_schema=use_schema, num_workers=num_workers)
-    dev_loader = get_dataloader(test_batch_size, "dev", use_schema=use_schema, num_workers=num_workers)
-    test_loader = get_dataloader(test_batch_size, "test", use_schema=use_schema, num_workers=num_workers)
+def load_t5_data(batch_size, test_batch_size, use_schema=False, num_workers=4, normalize_whitespace=False):
+    train_loader = get_dataloader(batch_size, "train", use_schema=use_schema,
+                                  num_workers=num_workers, normalize_whitespace=normalize_whitespace)
+    dev_loader = get_dataloader(test_batch_size, "dev", use_schema=use_schema,
+                                num_workers=num_workers, normalize_whitespace=normalize_whitespace)
+    test_loader = get_dataloader(test_batch_size, "test", use_schema=use_schema,
+                                 num_workers=num_workers, normalize_whitespace=normalize_whitespace)
     return train_loader, dev_loader, test_loader
 
 
