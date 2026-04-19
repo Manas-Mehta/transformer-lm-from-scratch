@@ -66,6 +66,18 @@ def get_args():
     parser.add_argument('--skip_train', action='store_true',
                         help="Load existing best checkpoint and only run dev + test eval.")
 
+    # Champion-run knobs.
+    parser.add_argument('--use_schema_prompt', action='store_true',
+                        help="Prepend compact DB schema to every encoder input.")
+    parser.add_argument('--bf16', action='store_true',
+                        help="Use bf16 autocast (H200-friendly, ~2x speedup, quality-neutral).")
+    parser.add_argument('--label_smoothing', type=float, default=0.0,
+                        help="Label smoothing for CE loss (0.0 disables).")
+    parser.add_argument('--grad_clip', type=float, default=0.0,
+                        help="Max grad norm. 0.0 disables clipping.")
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help="DataLoader workers. Keep >0 to avoid GPU starvation on HPC.")
+
     args = parser.parse_args()
     return args
 
@@ -125,28 +137,40 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
             break
 
 
+def _amp_context(args):
+    if args.bf16 and torch.cuda.is_available():
+        return torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+    # no-op context manager
+    import contextlib
+    return contextlib.nullcontext()
+
+
 def train_epoch(args, model, train_loader, optimizer, scheduler):
     model.train()
     total_loss = 0
     total_tokens = 0
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
     for encoder_input, encoder_mask, decoder_input, decoder_targets, _ in tqdm(train_loader):
         optimizer.zero_grad()
-        encoder_input = encoder_input.to(DEVICE)
-        encoder_mask = encoder_mask.to(DEVICE)
-        decoder_input = decoder_input.to(DEVICE)
-        decoder_targets = decoder_targets.to(DEVICE)
+        encoder_input = encoder_input.to(DEVICE, non_blocking=True)
+        encoder_mask = encoder_mask.to(DEVICE, non_blocking=True)
+        decoder_input = decoder_input.to(DEVICE, non_blocking=True)
+        decoder_targets = decoder_targets.to(DEVICE, non_blocking=True)
 
-        logits = model(
-            input_ids=encoder_input,
-            attention_mask=encoder_mask,
-            decoder_input_ids=decoder_input,
-        )['logits']
+        with _amp_context(args):
+            logits = model(
+                input_ids=encoder_input,
+                attention_mask=encoder_mask,
+                decoder_input_ids=decoder_input,
+            )['logits']
 
-        non_pad = decoder_targets != PAD_IDX
-        loss = criterion(logits[non_pad], decoder_targets[non_pad])
+            non_pad = decoder_targets != PAD_IDX
+            loss = criterion(logits[non_pad], decoder_targets[non_pad])
+
         loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
@@ -187,23 +211,25 @@ def eval_epoch(args, model, dev_loader, gt_sql_pth, model_sql_path, gt_record_pa
 
     with torch.no_grad():
         for encoder_input, encoder_mask, decoder_input, decoder_targets, _ in tqdm(dev_loader):
-            encoder_input = encoder_input.to(DEVICE)
-            encoder_mask = encoder_mask.to(DEVICE)
-            decoder_input = decoder_input.to(DEVICE)
-            decoder_targets = decoder_targets.to(DEVICE)
+            encoder_input = encoder_input.to(DEVICE, non_blocking=True)
+            encoder_mask = encoder_mask.to(DEVICE, non_blocking=True)
+            decoder_input = decoder_input.to(DEVICE, non_blocking=True)
+            decoder_targets = decoder_targets.to(DEVICE, non_blocking=True)
 
-            logits = model(
-                input_ids=encoder_input,
-                attention_mask=encoder_mask,
-                decoder_input_ids=decoder_input,
-            )['logits']
-            non_pad = decoder_targets != PAD_IDX
-            loss = criterion(logits[non_pad], decoder_targets[non_pad])
+            with _amp_context(args):
+                logits = model(
+                    input_ids=encoder_input,
+                    attention_mask=encoder_mask,
+                    decoder_input_ids=decoder_input,
+                )['logits']
+                non_pad = decoder_targets != PAD_IDX
+                loss = criterion(logits[non_pad], decoder_targets[non_pad])
             num_tokens = torch.sum(non_pad).item()
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
 
-            gen_ids = _generate(model, encoder_input, encoder_mask, args.num_beams, args.gen_max_length)
+            with _amp_context(args):
+                gen_ids = _generate(model, encoder_input, encoder_mask, args.num_beams, args.gen_max_length)
             decoded = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
             generated_queries.extend(decoded)
 
@@ -231,9 +257,10 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
     generated_queries = []
     with torch.no_grad():
         for encoder_input, encoder_mask, _ in tqdm(test_loader):
-            encoder_input = encoder_input.to(DEVICE)
-            encoder_mask = encoder_mask.to(DEVICE)
-            gen_ids = _generate(model, encoder_input, encoder_mask, args.num_beams, args.gen_max_length)
+            encoder_input = encoder_input.to(DEVICE, non_blocking=True)
+            encoder_mask = encoder_mask.to(DEVICE, non_blocking=True)
+            with _amp_context(args):
+                gen_ids = _generate(model, encoder_input, encoder_mask, args.num_beams, args.gen_max_length)
             decoded = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
             generated_queries.extend(decoded)
 
@@ -249,7 +276,10 @@ def main():
     if args.use_wandb:
         setup_wandb(args)
 
-    train_loader, dev_loader, test_loader = load_t5_data(args.batch_size, args.test_batch_size)
+    train_loader, dev_loader, test_loader = load_t5_data(
+        args.batch_size, args.test_batch_size,
+        use_schema=args.use_schema_prompt, num_workers=args.num_workers,
+    )
 
     if args.skip_train:
         model = load_model_from_checkpoint(args, best=True)

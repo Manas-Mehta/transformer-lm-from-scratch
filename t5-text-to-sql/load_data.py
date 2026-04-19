@@ -1,3 +1,4 @@
+import json
 import os
 
 from torch.utils.data import Dataset, DataLoader
@@ -13,11 +14,13 @@ PAD_IDX = 0
 # T5 was pre-trained with task prefixes; keeping one gives a small consistent boost.
 INPUT_PREFIX = "translate English to SQL: "
 
-# Set from data inspection: NL is short (max 65 tokens), SQL can be up to 511 tokens.
+# Default caps. Schema-in-prompt mode overrides MAX_SRC_LEN.
 MAX_SRC_LEN = 128
 MAX_TGT_LEN = 512
+MAX_SRC_LEN_WITH_SCHEMA = 1024
 
 _TOKENIZER = None
+_COMPACT_SCHEMA = None
 
 
 def get_tokenizer():
@@ -27,10 +30,27 @@ def get_tokenizer():
     return _TOKENIZER
 
 
+def build_compact_schema(data_folder="data"):
+    """Return a compact 'table(col1,col2,...) | ...' string for every entity in the DB schema."""
+    global _COMPACT_SCHEMA
+    if _COMPACT_SCHEMA is not None:
+        return _COMPACT_SCHEMA
+    schema_path = os.path.join(data_folder, "flight_database.schema")
+    with open(schema_path) as f:
+        s = json.load(f)
+    parts = []
+    for ent_name, cols in s["ents"].items():
+        col_names = list(cols.keys()) if isinstance(cols, dict) else list(cols)
+        parts.append(f"{ent_name}({','.join(col_names)})")
+    _COMPACT_SCHEMA = " | ".join(parts)
+    return _COMPACT_SCHEMA
+
+
 class T5Dataset(Dataset):
 
-    def __init__(self, data_folder, split):
+    def __init__(self, data_folder, split, use_schema=False):
         self.split = split
+        self.use_schema = use_schema
         self.tokenizer = get_tokenizer()
         # T5 uses pad_token_id (0) as the decoder_start_token_id. This is the "BOS".
         self.bos_id = self.tokenizer.pad_token_id
@@ -41,8 +61,14 @@ class T5Dataset(Dataset):
         with open(nl_path) as f:
             nl_lines = [line.strip() for line in f]
 
-        encoder_inputs = [INPUT_PREFIX + line for line in nl_lines]
-        enc = tokenizer(encoder_inputs, max_length=MAX_SRC_LEN, truncation=True)
+        if self.use_schema:
+            schema = build_compact_schema(data_folder)
+            encoder_inputs = [f"{INPUT_PREFIX}{schema} | Question: {line}" for line in nl_lines]
+            src_cap = MAX_SRC_LEN_WITH_SCHEMA
+        else:
+            encoder_inputs = [INPUT_PREFIX + line for line in nl_lines]
+            src_cap = MAX_SRC_LEN
+        enc = tokenizer(encoder_inputs, max_length=src_cap, truncation=True)
         self.encoder_ids = [torch.tensor(ids, dtype=torch.long) for ids in enc["input_ids"]]
 
         if split == "test":
@@ -110,19 +136,23 @@ def test_collate_fn(batch):
     return encoder_ids, encoder_mask, initial_decoder_inputs
 
 
-def get_dataloader(batch_size, split):
+def get_dataloader(batch_size, split, use_schema=False, num_workers=4):
     data_folder = 'data'
-    dset = T5Dataset(data_folder, split)
+    dset = T5Dataset(data_folder, split, use_schema=use_schema)
     shuffle = split == "train"
     collate_fn = normal_collate_fn if split != "test" else test_collate_fn
-    dataloader = DataLoader(dset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    dataloader = DataLoader(
+        dset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn,
+        num_workers=num_workers, pin_memory=True,
+        persistent_workers=(num_workers > 0),
+    )
     return dataloader
 
 
-def load_t5_data(batch_size, test_batch_size):
-    train_loader = get_dataloader(batch_size, "train")
-    dev_loader = get_dataloader(test_batch_size, "dev")
-    test_loader = get_dataloader(test_batch_size, "test")
+def load_t5_data(batch_size, test_batch_size, use_schema=False, num_workers=4):
+    train_loader = get_dataloader(batch_size, "train", use_schema=use_schema, num_workers=num_workers)
+    dev_loader = get_dataloader(test_batch_size, "dev", use_schema=use_schema, num_workers=num_workers)
+    test_loader = get_dataloader(test_batch_size, "test", use_schema=use_schema, num_workers=num_workers)
     return train_loader, dev_loader, test_loader
 
 
